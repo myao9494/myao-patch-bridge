@@ -11,7 +11,7 @@ from .config import SettingsStore
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Myao Rep Patch")
+    parser = argparse.ArgumentParser(description="Myao Patch Bridge")
     parser.add_argument("--no-browser", action="store_true", help="Edge/ブラウザを自動で開かない")
     args = parser.parse_args()
     settings = SettingsStore().load()

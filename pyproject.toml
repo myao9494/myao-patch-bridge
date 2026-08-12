@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "myao-rep-patch"
+name = "myao-patch-bridge"
 version = "0.1.0"
 description = "Offline-first patch publisher and applier for independently initialized Git repositories"
 readme = "README.md"
@@ -22,7 +22,7 @@ dev = [
 ]
 
 [project.scripts]
-rep-patch = "rep_patch.main:main"
+patch-bridge = "rep_patch.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rep_patch"]

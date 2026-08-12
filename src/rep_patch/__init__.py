@@ -1,3 +1,3 @@
-"""Myao Rep Patch."""
+"""Myao Patch Bridge."""
 
 __version__ = "0.1.0"

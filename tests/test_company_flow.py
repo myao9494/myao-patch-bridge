@@ -7,7 +7,7 @@ from pathlib import Path
 from rep_patch.company import apply_archive, load_state
 from rep_patch.config import Settings
 from rep_patch.git import changed_paths, tracked_files
-from rep_patch.packages import SCHEMA_VERSION, split_patch
+from rep_patch.packages import PACKAGE_TYPE, SCHEMA_VERSION, split_patch
 from rep_patch.security import sha256_bytes, sign_document
 
 PASSWORD = "test-password"
@@ -69,7 +69,7 @@ def make_package_repo(
     index = sign_document(
         {
             "schema_version": SCHEMA_VERSION,
-            "package_type": "myao-rep-patch",
+            "package_type": PACKAGE_TYPE,
             "packages": entries,
         },
         PASSWORD,

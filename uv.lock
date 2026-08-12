@@ -270,7 +270,7 @@ wheels = [
 ]
 
 [[package]]
-name = "myao-rep-patch"
+name = "myao-patch-bridge"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

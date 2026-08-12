@@ -31,7 +31,7 @@ npm run dev
 別ターミナルでAPIを起動します。
 
 ```bash
-uv run rep-patch --no-browser
+uv run patch-bridge --no-browser
 ```
 
 Vite開発サーバーは `/api` を `127.0.0.1:17345` へプロキシします。

@@ -1,5 +1,5 @@
 class RepPatchError(RuntimeError):
-    """An expected, user-facing Rep Patch error."""
+    """An expected, user-facing Patch Bridge error."""
 
 
 class GitCommandError(RepPatchError):

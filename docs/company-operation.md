@@ -12,7 +12,7 @@ Git clone、Node.js、npm、管理者権限は不要です。
 
 ## 初回導入
 
-1. `rep_patch` のGitHub ZIPを会社へ持ち込み、固定フォルダへ展開します。
+1. `myao-patch-bridge` のGitHub ZIPを会社へ持ち込み、固定フォルダへ展開します。
 2. `install_company.bat` を実行します。
 3. `start_patch_app.bat` を実行します。
 4. Edgeで `http://127.0.0.1:17345` が開きます。
@@ -86,7 +86,7 @@ PWAをインストールしてもPythonサーバーは必要です。利用前�
 ## Patch Appの更新
 
 1. Patch Appを終了します。
-2. 新しい `rep_patch` ZIPを会社へ持ち込みます。
+2. 新しい `myao-patch-bridge` ZIPを会社へ持ち込みます。
 3. 既存フォルダへ上書きします。
 4. `install_company.bat` を再実行します。
 5. `start_patch_app.bat` を起動します。

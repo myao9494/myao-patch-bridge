@@ -147,7 +147,7 @@ def publish(settings: Settings, store: SettingsStore) -> dict[str, Any]:
             )
     else:
         attributes_path.write_text(
-            "# Managed by Myao Rep Patch\n"
+            "# Managed by Myao Patch Bridge\n"
             f"{binary_rule}\n"
             "*.json text eol=lf\n",
             encoding="utf-8",

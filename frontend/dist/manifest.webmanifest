@@ -1,6 +1,6 @@
 {
-  "name": "Myao Rep Patch",
-  "short_name": "Rep Patch",
+  "name": "Myao Patch Bridge",
+  "short_name": "Patch Bridge",
   "description": "オフライン環境向けGitパッチ管理",
   "start_url": "/",
   "scope": "/",

@@ -3,13 +3,13 @@
 ## 初回導入
 
 ```bash
-cd /Users/mine/000_work/app/rep_patch
+cd /Users/mine/000_work/app/myao-patch-bridge
 uv sync --extra dev
 cd frontend
 npm install
 npm run build
 cd ..
-uv run rep-patch
+uv run patch-bridge
 ```
 
 ハンバーガーメニューで「自宅」を選び、次を設定します。
@@ -38,7 +38,7 @@ Obsidian設定リポジトリ
 5. 「会社の初期導入地点」に、会社に現在入っている内容に相当する自宅側コミットを入力します。
 6. 「この設定を保存」を押します。
 
-`rep_patch` 自身は検出対象から自動除外されます。
+`myao-patch-bridge` 自身は検出対象から自動除外されます。
 
 初期導入地点には、コミットID、タグ、ブランチ名を入力できます。保存時に完全なコミットIDへ解決されます。会社側のコミットIDは入力しません。
 

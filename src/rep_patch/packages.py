@@ -17,6 +17,8 @@ from .errors import PackageValidationError
 from .security import safe_relative_path, sha256_bytes, sign_document, verify_document
 
 SCHEMA_VERSION = 1
+PACKAGE_TYPE = "myao-patch-bridge"
+LEGACY_PACKAGE_TYPES = {"myao-rep-patch"}
 MAX_ZIP_FILES = 20_000
 MAX_ZIP_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 MAX_JSON_BYTES = 20 * 1024 * 1024
@@ -45,7 +47,7 @@ def new_index(password: str) -> dict[str, Any]:
     return sign_document(
         {
             "schema_version": SCHEMA_VERSION,
-            "package_type": "myao-rep-patch",
+            "package_type": PACKAGE_TYPE,
             "packages": [],
         },
         password,
@@ -63,8 +65,8 @@ def load_index(path: Path, password: str) -> dict[str, Any]:
 def validate_index(value: dict[str, Any], password: str) -> None:
     if value.get("schema_version") != SCHEMA_VERSION:
         raise PackageValidationError("未対応のパッケージ形式です")
-    if value.get("package_type") != "myao-rep-patch":
-        raise PackageValidationError("Rep Patchパッケージではありません")
+    if value.get("package_type") not in {PACKAGE_TYPE} | LEGACY_PACKAGE_TYPES:
+        raise PackageValidationError("Patch Bridgeパッケージではありません")
     if not isinstance(value.get("packages"), list):
         raise PackageValidationError("packagesが不正です")
     verify_document(value, password)

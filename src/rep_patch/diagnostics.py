@@ -59,7 +59,7 @@ def _git_patch_roundtrip() -> str:
         target = root / "target"
         source.mkdir()
         run_git(source, ["init"])
-        run_git(source, ["config", "user.name", "Rep Patch Diagnostic"])
+        run_git(source, ["config", "user.name", "Patch Bridge Diagnostic"])
         run_git(source, ["config", "user.email", "diagnostic@localhost"])
         (source / "text.txt").write_bytes(b"line 1\nline 2\n")
         (source / "binary.bin").write_bytes(bytes(range(256)) * 8)
@@ -76,7 +76,7 @@ def _git_patch_roundtrip() -> str:
 
         target.mkdir()
         run_git(target, ["init"])
-        run_git(target, ["config", "user.name", "Rep Patch Diagnostic"])
+        run_git(target, ["config", "user.name", "Patch Bridge Diagnostic"])
         run_git(target, ["config", "user.email", "diagnostic@localhost"])
         (target / "text.txt").write_bytes(b"line 1\nline 2\n")
         (target / "binary.bin").write_bytes(bytes(range(256)) * 8)

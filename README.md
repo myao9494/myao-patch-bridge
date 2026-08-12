@@ -1,4 +1,4 @@
-# Myao Rep Patch
+# Myao Patch Bridge
 
 インターネットへ接続できない会社環境へ、複数のGitリポジトリとObsidian設定の変更を安全に持ち込むためのPWAです。
 
@@ -22,7 +22,7 @@
 ```bash
 uv sync --extra dev
 cd frontend && npm install && npm run build && cd ..
-uv run rep-patch
+uv run patch-bridge
 ```
 
 既定では `http://127.0.0.1:17345` を開きます。

@@ -25,7 +25,7 @@ def test_pwa_is_served_with_local_only_security_headers(tmp_path) -> None:
     client = TestClient(create_app(SettingsStore(tmp_path / "settings.local.json")))
     response = client.get("/")
     assert response.status_code == 200
-    assert "Myao Rep Patch" in response.text
+    assert "Myao Patch Bridge" in response.text
     assert response.headers["x-frame-options"] == "DENY"
     assert "default-src 'self'" in response.headers["content-security-policy"]
     manifest = client.get("/manifest.webmanifest")

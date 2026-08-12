@@ -10,7 +10,7 @@
 flowchart LR
     subgraph Home["自宅"]
         Source["アプリ群・Obsidian設定"]
-        HomeApp["Rep Patch / Home mode"]
+        HomeApp["Patch Bridge / Home mode"]
         Source --> HomeApp
     end
     subgraph GitHub["Public GitHub"]
@@ -19,7 +19,7 @@ flowchart LR
     end
     subgraph Company["会社・オフライン"]
         Downloads["%USERPROFILE%\\Downloads"]
-        CompanyApp["Rep Patch / Company mode"]
+        CompanyApp["Patch Bridge / Company mode"]
         CompanyRepos["独自にgit initされたアプリ群"]
         Downloads --> CompanyApp --> CompanyRepos
     end
@@ -31,7 +31,7 @@ flowchart LR
 Patch App本体のリポジトリと生成パッチ専用リポジトリは分離します。
 
 ```text
-rep_patch              Patch App本体
+myao-patch-bridge      Patch App本体
 myao_app_patch         生成パッチ専用
 ```
 

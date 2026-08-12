@@ -24,7 +24,7 @@ Patch Appはパッチ専用リポジトリの `.gitattributes` に `*.patch.part
 ```json
 {
   "schema_version": 1,
-  "package_type": "myao-rep-patch",
+  "package_type": "myao-patch-bridge",
   "packages": [
     {
       "repo_id": "app-a",

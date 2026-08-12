@@ -45,7 +45,7 @@ class CommitRequest(BaseModel):
 def create_app(store: SettingsStore | None = None) -> FastAPI:
     settings_store = store or SettingsStore()
     session_token = secrets.token_urlsafe(32)
-    app = FastAPI(title="Myao Rep Patch", version=__version__)
+    app = FastAPI(title="Myao Patch Bridge", version=__version__)
 
     @app.middleware("http")
     async def local_security(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -156,7 +156,7 @@ def create_app(store: SettingsStore | None = None) -> FastAPI:
                 return FileResponse(requested)
             return FileResponse(frontend / "index.html")
         return HTMLResponse(
-            "<h1>Myao Rep Patch</h1><p>frontend/dist がありません。Reactをビルドしてください。</p>",
+            "<h1>Myao Patch Bridge</h1><p>frontend/dist がありません。Reactをビルドしてください。</p>",
             status_code=503,
         )
 

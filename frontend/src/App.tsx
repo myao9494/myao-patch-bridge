@@ -255,7 +255,7 @@ export default function App() {
         <button className="icon-button" onClick={() => setDrawer(true)} aria-label="設定を開く">
           <Menu size={22} />
         </button>
-        <div className="brand-mark"><CircleDot size={22} /><span>Myao Rep Patch</span></div>
+        <div className="brand-mark"><CircleDot size={22} /><span>Myao Patch Bridge</span></div>
         {installPrompt && <button className="install-button" onClick={installPwa}><Smartphone size={15}/>アプリとしてインストール</button>}
         <span className={`mode-badge ${settings.mode}`}>{settings.mode === "home" ? "HOME" : "COMPANY"}</span>
       </header>
