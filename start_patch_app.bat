@@ -8,6 +8,7 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 
+rem Reuse the fixed app port by stopping any previous instance.
 set "PORT=17345"
 for /f "tokens=5" %%P in ('netstat -ano -p tcp ^| findstr ":%PORT%" ^| findstr "LISTENING"') do (
   echo Stopping the existing process on port %PORT% (PID %%P)...

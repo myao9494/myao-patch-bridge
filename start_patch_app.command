@@ -4,6 +4,7 @@ if [ ! -x ".venv/bin/python" ]; then
   echo "Run: uv sync --extra dev"
   exit 1
 fi
+# Reuse the fixed app port by stopping any previous instance.
 PORT=17345
 PIDS="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
 if [ -n "$PIDS" ]; then
