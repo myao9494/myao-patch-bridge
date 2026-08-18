@@ -1,3 +1,8 @@
+<!--
+  Myao Patch Bridge 会社側の導入・運用手順書
+  会社PC環境での初回セットアップ、起動手順（.venvあり/なし）、通常運用、トラブルシューティングについて記載します。
+-->
+
 # 会社側の導入・運用
 
 ## 動作条件
@@ -8,19 +13,21 @@
 - Microsoft Edge
 - 初回導入・更新時のみpip通信が許可されていること
 
-Git clone、Node.js、npm、管理者権限は不要です。
+Git clone、Node.js、npm build、管理者権限は不要です（フロントエンドはビルド済み成果物が同梱されています）。
 
 ## 初回導入
 
 1. `myao-patch-bridge` のGitHub ZIPを会社へ持ち込み、固定フォルダへ展開します。
-2. `install_company.bat` を実行します。
-3. `start_patch_app.bat` を実行します。
+2. `install_company.bat` を実行します（`.venv` が作成できない環境では自動的にシステムPython環境へインストールされます）。
+   - コマンドで手動インストールする場合: `python -m pip install --require-hashes -r requirements.lock`
+3. `start_patch_app.bat` をダブルクリックして実行します（またはコマンドプロンプトで `set PYTHONPATH=src && python -m rep_patch`）。
 4. Edgeで `http://127.0.0.1:17345` が開きます。
 5. Edgeのインストールアイコン、または画面の「アプリとしてインストール」を押します。
 
-`install_company.bat` は `.venv` を作り、`requirements.lock` のバージョンとSHA-256に一致するPythonパッケージだけをpipで取得します。
+`install_company.bat` は `.venv` が利用可能な場合は `.venv` を作成し、`requirements.lock` のバージョンとSHA-256に一致するPythonパッケージだけをpipで安全に取得します。
 
 PWAをインストールしてもPythonサーバーは必要です。利用前に必ず `start_patch_app.bat` を起動してください。
+
 
 ## 初期設定
 
