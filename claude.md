@@ -1,25 +1,27 @@
 # Myao Patch Bridge 仕様書
 
-## 概要
-インターネット非接続環境（会社等）と自宅環境の間で、Gitリポジトリの差分パッチを安全に同期・適用するためのローカルブリッジアプリケーション。
+## 1. 概要
+インターネット未接続の会社PCへ、自宅で開発したGitリポジトリ（複数アプリ）およびObsidian設定の差分を、署名・検証付きパッチ（ZIP）として安全に転送・適用するためのオフラインファーストWeb/PWAアプリケーション。
 
 ---
 
-## アーキテクチャ
+## 2. アーキテクチャ・システム構成
 
-- **バックエンド**: Python 3.12+ / FastAPI / Uvicorn (127.0.0.1 のみ待受)
-- **フロントエンド**: React 19 / TypeScript / Vite / Vanilla CSS (PWA対応)
+- **バックエンド**: Python 3.10+ / FastAPI / Uvicorn (127.0.0.1:17345 のみ待受)
+- **フロントエンド**: React 19 / TypeScript / Vite / Vanilla CSS (自宅でビルドした `frontend/dist` を静的ホスト、PWA対応)
+- **通信**: ローカルループバック（`http://127.0.0.1:17345`）限定、セッショントークン検証
 - **セキュリティ**:
   - ローカルホスト限定アクセス
   - X-Rep-Patch-Token によるCSRF対策
-  - HMAC-SHA256 によるマニフェスト・インデックス署名検証
-  - パストラバーサル防止
+  - HMAC-SHA-256 によるマニフェスト・インデックス署名検証
+  - 各パッチの SHA-256 検証
+  - ZIP パストラバーサル防止
 
 ---
 
-## 動作モード
+## 3. 動作モード
 
-### 1. 自宅モード (`home`)
+### 自宅モード (`home`)
 - **リポジトリ管理**:
   - **自動検出**: アプリルート（`apps_root`）および Obsidian 設定（`obsidian_repo`）配下の Git リポジトリを一括検出
   - **手動追加**: 任意のパスを指定してリポジトリカードを追加（`POST /api/repositories`）
@@ -29,11 +31,13 @@
 - **パッチ公開 (`publish`)**:
   - 選択・有効化されたリポジトリの未公開コミット差分をバイナリパッチ（20MiB分割可）として生成
   - 署名付き `manifest.json` および `package-index.json` をパッチ専用リポジトリへコミット＆push
+- **開発起動**: `uv run patch-bridge` / `frontend` で `npm run build`
 
-### 2. 会社モード (`company`)
+### 会社モード (`company`)
+- **Node.js / npm 不要**: 同梱の `frontend/dist` を使用。
+- **Python 実行**: `.venv` なしでもシステムの Python で起動可能（`start_patch_app.bat` または `set PYTHONPATH=src && python -m rep_patch`）。
 - **パッチ受信・検証**:
-  - ダウンロードフォルダ内の `myao_app_patch*.zip` を検索
-  - 署名・SHA-256・リポジトリ対応状況を検証（`inspect`）
+  - `Downloads` フォルダ内の `myao_app_patch*.zip` を検索・検証（署名・SHA-256・リポジトリ対応状況の一致確認）。
 - **パッチ適用・コミット**:
   - 会社側リポジトリへ未コミット状態でパッチ適用（ロールバック用バックアップ作成）
   - 動作確認後に「確認済みをコミット」（`commit-pending`）
@@ -43,7 +47,17 @@
 
 ---
 
-## API仕様一覧
+## 4. 起動スクリプト仕様
+- **`start_patch_app.bat`**:
+  - Windowsコマンドプロンプトのパーサー互換性を担保（構文エラーや文字化けを防止）。
+  - `.venv\Scripts\python.exe` があれば優先使用、なければシステム `python` を自動使用。
+  - ポート `17345` の既存プロセスを停止して起動。
+- **`install_company.bat`**:
+  - `.venv` 作成を試行し、不可の場合はシステム環境へ `requirements.lock`（ハッシュ検証付き）を直接インストール。
+
+---
+
+## 5. API仕様一覧
 
 | メソッド | パス | 説明 |
 | :--- | :--- | :--- |
@@ -66,5 +80,5 @@
 
 ---
 
-## データ保存場所
+## 6. データ保存場所
 - 設定ファイル: `data/settings.local.json`（Git管理外）

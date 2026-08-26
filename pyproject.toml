@@ -1,3 +1,8 @@
+# ==============================================================================
+# Myao Patch Bridge プロジェクト設定ファイル (pyproject.toml)
+# パッケージ構成、依存関係、pytest設定などを管理します。
+# ==============================================================================
+
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
@@ -29,4 +34,6 @@ packages = ["src/rep_patch"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 addopts = "-q"
+
