@@ -1,24 +1,45 @@
+/**
+ * Myao Patch Bridge フロントエンド アプリケーションメイン
+ * 
+ * 仕様:
+ * - 自宅モード（HomeDashboard）:
+ *   - リポジトリの自動検出（再検出）
+ *   - リポジトリカードの手動追加（パス指定・ブランチ・種類・初期導入地点）
+ *   - リポジトリカードの削除（管理対象からの除外）
+ *   - リポジトリの有効/無効トグル（パッチ公開対象の選択）
+ *   - リポジトリ設定の保存および未公開パッチの作成・公開
+ * - 会社モード（CompanyDashboard）:
+ *   - ダウンロード済みパッチZIPの検索・選択・署名検証
+ *   - 会社側リポジトリへの差分適用・復元・コミット
+ *   - 会社側環境診断
+ * - 共通: 設定ドロワー、PWAインストールプロンプト、通知・エラーバナー
+ */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Archive,
   Check,
+  CheckSquare,
   ChevronRight,
   CircleDot,
   CloudUpload,
   Download,
   FileArchive,
+  FolderPlus,
   GitBranch,
   HardDrive,
   LoaderCircle,
   Menu,
   PackageCheck,
+  Plus,
   RefreshCw,
   RotateCcw,
   Save,
   Settings as SettingsIcon,
   ShieldCheck,
   Smartphone,
+  Square,
+  Trash2,
   X,
 } from "lucide-react";
 import { api, jsonBody } from "./api";
@@ -27,6 +48,7 @@ import type {
   OperationResult,
   PackageSummary,
   Repository,
+  RepositoryCreatePayload,
   Settings,
 } from "./types";
 
@@ -67,6 +89,7 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(emptySettings);
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [drawer, setDrawer] = useState(false);
+  const [addModalOpen, setAddModalOpen] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -173,6 +196,58 @@ export default function App() {
     }
   };
 
+  const addRepository = async (payload: RepositoryCreatePayload): Promise<boolean> => {
+    const value = await perform("リポジトリを追加中", () =>
+      api<Repository>("/api/repositories", {
+        method: "POST",
+        ...jsonBody(payload),
+      })
+    );
+    if (value) {
+      setNotice(`リポジトリ「${value.display_name}」を追加しました`);
+      await loadRepositories();
+      setAddModalOpen(false);
+      return true;
+    }
+    return false;
+  };
+
+  const deleteRepository = async (repository: Repository) => {
+    const ok = window.confirm(
+      `リポジトリ「${repository.display_name}」のカードを削除しますか？\n\n※ローカルのファイルやGitリポジトリは削除されず、本ツールの管理対象からのみ除外されます。`
+    );
+    if (!ok) return;
+
+    const value = await perform(`${repository.display_name}を削除中`, () =>
+      api<{ deleted: boolean; repo_id: string }>(`/api/repositories/${repository.repo_id}`, {
+        method: "DELETE",
+      })
+    );
+    if (value) {
+      setNotice(`リポジトリ「${repository.display_name}」を削除しました`);
+      await loadRepositories();
+    }
+  };
+
+  const toggleAllRepositories = async (enable: boolean) => {
+    if (!repositories.length) return;
+    const value = await perform(enable ? "全リポジトリを選択中" : "全リポジトリの選択を解除中", async () => {
+      await Promise.all(
+        repositories.map((repo) =>
+          api<Repository>(`/api/repositories/${repo.repo_id}`, {
+            method: "PUT",
+            ...jsonBody({ values: { enabled: enable } }),
+          })
+        )
+      );
+      await loadRepositories();
+      return true;
+    });
+    if (value) {
+      setNotice(enable ? "すべてのリポジトリを選択しました" : "すべてのリポジトリの選択を解除しました");
+    }
+  };
+
   const publish = async () => {
     if (!confirm("変更パッチを作成し、パッチ専用リポジトリへpushしますか？")) return;
     const value = await perform("パッチを作成・公開中", () =>
@@ -272,6 +347,9 @@ export default function App() {
             onPublish={publish}
             onUpdateRepo={updateRepo}
             onSaveRepo={saveRepository}
+            onDeleteRepo={deleteRepository}
+            onOpenAddModal={() => setAddModalOpen(true)}
+            onToggleAll={toggleAllRepositories}
           />
         ) : (
           <CompanyDashboard
@@ -292,6 +370,13 @@ export default function App() {
         )}
       </main>
 
+      {addModalOpen && (
+        <AddRepositoryModal
+          onClose={() => setAddModalOpen(false)}
+          onAdd={addRepository}
+        />
+      )}
+
       {drawer && <SettingsDrawer settings={settings} setSettings={setSettings} onSave={saveSettings} onClose={() => setDrawer(false)} />}
       {busy && <div className="busy-overlay"><div className="busy-card"><LoaderCircle className="spin" size={30}/><strong>{busy}</strong><span>この画面を閉じないでください</span></div></div>}
     </div>
@@ -306,37 +391,259 @@ function HomeDashboard(props: {
   onPublish: () => void;
   onUpdateRepo: (id: string, value: Partial<Repository>) => void;
   onSaveRepo: (repo: Repository) => void;
+  onDeleteRepo: (repo: Repository) => void;
+  onOpenAddModal: () => void;
+  onToggleAll: (enable: boolean) => void;
 }) {
+  const allEnabled = props.repositories.length > 0 && props.repositories.every((r) => r.enabled);
+  const someEnabled = props.repositories.some((r) => r.enabled);
+
   return <>
     <section className="hero home-hero">
-      <div><p className="eyebrow">PATCH PUBLISHER</p><h1>変更を、確実な<br/>受け渡し単位へ。</h1><p>登録ブランチの差分だけを検出し、検証可能なパッケージとして公開します。</p></div>
-      <div className="hero-stat"><span>未公開コミット</span><strong>{props.unpublished}</strong><small>{props.repositories.filter((item) => item.enabled).length} repositories tracked</small></div>
+      <div><p className="eyebrow">PATCH PUBLISHER</p><h1>変更を、確実な<br/>受け渡し単位へ。</h1><p>対象リポジトリを選択し、登録ブランチの差分だけを安全にパッケージとして公開します。</p></div>
+      <div className="hero-stat"><span>未公開コミット</span><strong>{props.unpublished}</strong><small>{props.repositories.filter((item) => item.enabled).length} / {props.repositories.length} repos selected</small></div>
     </section>
     <section className="toolbar">
-      <div><h2>リポジトリ</h2><p>初期導入地点と固定ブランチを管理します</p></div>
-      <div className="button-row">
-        <button className="button ghost" onClick={props.onDiscover}><HardDrive size={17}/>再検出</button>
-        <button className="button ghost" onClick={props.onRefresh}><RefreshCw size={17}/>更新</button>
-        <button className="button primary" onClick={props.onPublish}><CloudUpload size={17}/>パッチを作成・公開</button>
+      <div>
+        <h2>対象リポジトリ</h2>
+        <p>カードの追加・削除やトグルで対象を選択し、ブランチと導入地点を管理します</p>
+      </div>
+      <div className="button-row wrap">
+        <button className="button primary" onClick={props.onOpenAddModal}>
+          <Plus size={17} />リポジトリを追加
+        </button>
+        <button className="button ghost" onClick={props.onDiscover}>
+          <HardDrive size={17} />再検出
+        </button>
+        <button className="button ghost" onClick={props.onRefresh}>
+          <RefreshCw size={17} />更新
+        </button>
+        <button className="button dark" onClick={props.onPublish} disabled={!someEnabled}>
+          <CloudUpload size={17} />パッチを作成・公開
+        </button>
       </div>
     </section>
-    <div className="repo-grid">
-      {props.repositories.map((repo) => <article className={`repo-card ${repo.enabled ? "" : "disabled"}`} key={repo.repo_id}>
-        <div className="repo-heading">
-          <div className={`repo-icon ${repo.kind}`}><GitBranch size={20}/></div>
-          <div><h3>{repo.display_name}</h3><p>{repo.path}</p></div>
-          <label className="switch"><input type="checkbox" checked={repo.enabled} onChange={(e) => props.onUpdateRepo(repo.repo_id, {enabled: e.target.checked})}/><span/></label>
+
+    {props.repositories.length > 0 && (
+      <div className="selection-bar">
+        <span className="selection-count">
+          <strong>{props.repositories.filter((r) => r.enabled).length}</strong> / {props.repositories.length} 件が公開対象
+        </span>
+        <div className="selection-actions">
+          <button
+            className="text-action-button"
+            onClick={() => props.onToggleAll(true)}
+            disabled={allEnabled}
+          >
+            <CheckSquare size={14} />すべて選択
+          </button>
+          <button
+            className="text-action-button"
+            onClick={() => props.onToggleAll(false)}
+            disabled={!someEnabled}
+          >
+            <Square size={14} />すべて解除
+          </button>
         </div>
-        {repo.error ? <div className="inline-error">{repo.error}</div> : <>
-          <div className="repo-metrics"><div><span>公開済み</span><code>{shortHash(repo.published_commit || repo.baseline_commit)}</code></div><div><span>現在</span><code>{shortHash(repo.target_commit)}</code></div><div><span>未公開</span><strong>{repo.unpublished_commits ?? 0}</strong></div></div>
-          <label>固定ブランチ<input value={repo.branch} onChange={(e) => props.onUpdateRepo(repo.repo_id, {branch: e.target.value})}/></label>
-          <label>会社の初期導入地点<input placeholder="コミットID、タグ、ブランチ" value={repo.baseline_commit} onChange={(e) => props.onUpdateRepo(repo.repo_id, {baseline_commit: e.target.value})}/></label>
-          <button className="text-button" onClick={() => props.onSaveRepo(repo)}><Save size={15}/>この設定を保存</button>
-        </>}
-      </article>)}
-      {!props.repositories.length && <EmptyState icon={<Archive/>} title="リポジトリが未登録です" text="設定を保存してから「再検出」を押してください"/>}
+      </div>
+    )}
+
+    <div className="repo-grid">
+      {props.repositories.map((repo) => (
+        <article className={`repo-card ${repo.enabled ? "" : "disabled"}`} key={repo.repo_id}>
+          <div className="repo-heading">
+            <div className={`repo-icon ${repo.kind}`}><GitBranch size={20} /></div>
+            <div>
+              <h3>{repo.display_name}</h3>
+              <p>{repo.path}</p>
+            </div>
+            <div className="repo-header-actions">
+              <label className="switch" title={repo.enabled ? "パッチ作成の対象（クリックで無効化）" : "パッチ作成対象外（クリックで有効化）"}>
+                <input
+                  type="checkbox"
+                  checked={repo.enabled}
+                  onChange={(e) => {
+                    const nextVal = e.target.checked;
+                    props.onUpdateRepo(repo.repo_id, { enabled: nextVal });
+                    props.onSaveRepo({ ...repo, enabled: nextVal });
+                  }}
+                />
+                <span />
+              </label>
+              <button
+                className="icon-button delete-repo-btn"
+                title="このリポジトリカードを削除"
+                aria-label={`${repo.display_name} を削除`}
+                onClick={() => props.onDeleteRepo(repo)}
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          </div>
+          {repo.error ? (
+            <div className="inline-error">{repo.error}</div>
+          ) : (
+            <>
+              <div className="repo-metrics">
+                <div>
+                  <span>公開済み</span>
+                  <code>{shortHash(repo.published_commit || repo.baseline_commit)}</code>
+                </div>
+                <div>
+                  <span>現在</span>
+                  <code>{shortHash(repo.target_commit)}</code>
+                </div>
+                <div>
+                  <span>未公開</span>
+                  <strong>{repo.unpublished_commits ?? 0}</strong>
+                </div>
+              </div>
+              <label>
+                固定ブランチ
+                <input
+                  value={repo.branch}
+                  onChange={(e) => props.onUpdateRepo(repo.repo_id, { branch: e.target.value })}
+                />
+              </label>
+              <label>
+                会社の初期導入地点
+                <input
+                  placeholder="コミットID、タグ、ブランチ"
+                  value={repo.baseline_commit}
+                  onChange={(e) => props.onUpdateRepo(repo.repo_id, { baseline_commit: e.target.value })}
+                />
+              </label>
+              <button className="text-button" onClick={() => props.onSaveRepo(repo)}>
+                <Save size={15} />この設定を保存
+              </button>
+            </>
+          )}
+        </article>
+      ))}
+      {!props.repositories.length && (
+        <EmptyState
+          icon={<Archive />}
+          title="リポジトリが登録されていません"
+          text="「リポジトリを追加」ボタンから手動登録するか、設定のアプリルートを指定して「再検出」を押してください"
+        />
+      )}
     </div>
   </>;
+}
+
+function AddRepositoryModal(props: {
+  onClose: () => void;
+  onAdd: (payload: RepositoryCreatePayload) => Promise<boolean>;
+}) {
+  const [path, setPath] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [kind, setKind] = useState<"app" | "obsidian">("app");
+  const [branch, setBranch] = useState("");
+  const [baselineCommit, setBaselineCommit] = useState("");
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!path.trim()) return;
+    await props.onAdd({
+      path: path.trim(),
+      display_name: displayName.trim() || undefined,
+      kind,
+      branch: branch.trim() || undefined,
+      baseline_commit: baselineCommit.trim() || undefined,
+      enabled: true,
+    });
+  };
+
+  return (
+    <div className="modal-layer">
+      <button className="modal-scrim" onClick={props.onClose} aria-label="閉じる" />
+      <div className="modal-card">
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">ADD REPOSITORY</p>
+            <h2><FolderPlus size={20} />リポジトリを追加</h2>
+          </div>
+          <button className="icon-button" onClick={props.onClose} aria-label="閉じる">
+            <X size={18} />
+          </button>
+        </div>
+        <form onSubmit={handleSubmit}>
+          <div className="modal-body">
+            <label className="field">
+              <span>リポジトリのパス <strong className="required">*</strong></span>
+              <input
+                type="text"
+                placeholder="/Users/mine/000_work/app/my-app"
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+                required
+                autoFocus
+              />
+              <small className="field-hint">Gitリポジトリの絶対パスを入力してください</small>
+            </label>
+
+            <label className="field">
+              <span>表示名（省略時はフォルダ名）</span>
+              <input
+                type="text"
+                placeholder="my-app"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+            </label>
+
+            <div className="field">
+              <span>種類</span>
+              <div className="segmented">
+                <button
+                  type="button"
+                  className={kind === "app" ? "active" : ""}
+                  onClick={() => setKind("app")}
+                >
+                  通常アプリ (app)
+                </button>
+                <button
+                  type="button"
+                  className={kind === "obsidian" ? "active" : ""}
+                  onClick={() => setKind("obsidian")}
+                >
+                  Obsidian設定 (obsidian)
+                </button>
+              </div>
+            </div>
+
+            <label className="field">
+              <span>固定ブランチ（省略時は現在のHEAD）</span>
+              <input
+                type="text"
+                placeholder="main"
+                value={branch}
+                onChange={(e) => setBranch(e.target.value)}
+              />
+            </label>
+
+            <label className="field">
+              <span>会社の初期導入地点（省略可）</span>
+              <input
+                type="text"
+                placeholder="コミットID、タグ、ブランチ"
+                value={baselineCommit}
+                onChange={(e) => setBaselineCommit(e.target.value)}
+              />
+            </label>
+          </div>
+          <div className="modal-footer">
+            <button type="button" className="button ghost" onClick={props.onClose}>
+              キャンセル
+            </button>
+            <button type="submit" className="button primary" disabled={!path.trim()}>
+              <Plus size={16} />リポジトリを追加
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 }
 
 function CompanyDashboard(props: {

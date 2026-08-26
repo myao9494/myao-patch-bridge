@@ -1,3 +1,11 @@
+"""
+Myao Patch Bridge 例外定義モジュール
+
+仕様:
+- RepPatchError: ユーザー向けベース例外クラス
+- GitCommandError: Gitコマンド失敗時の詳細例外
+- PackageValidationError: パッチZIP・署名検証失敗時の例外
+"""
 class RepPatchError(RuntimeError):
     """An expected, user-facing Patch Bridge error."""
 

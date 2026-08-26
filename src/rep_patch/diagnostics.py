@@ -1,3 +1,9 @@
+"""
+環境診断（Pythonバージョン、Gitコマンド、ポート使用状況、各種ディレクトリ権限等）を行うモジュール
+
+仕様:
+- run_diagnostics: 各種診断項目（Python, Git, Port, AppsRoot, DownloadDir, PatchPassword等）を実行し結果を返却
+"""
 from __future__ import annotations
 
 import platform

@@ -1,3 +1,11 @@
+"""
+アプリケーション設定およびリポジトリ設定の定義・永続化モジュール
+
+仕様:
+- RepositoryConfig: 単一リポジトリの設定（repo_id, display_name, path, kind, enabled, branch, baseline_commit, published_commit）
+- Settings: アプリケーション全体設定（mode, 各種ルートパス, パスワード, 待受ポート, 分割サイズ, repositories）
+- SettingsStore: 設定のローカルJSON永続化（data/settings.local.json）およびバリデーション
+"""
 from __future__ import annotations
 
 import json

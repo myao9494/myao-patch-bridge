@@ -1,3 +1,14 @@
+"""
+自宅環境でのリポジトリ検出・登録・管理およびパッチ公開処理を行うモジュール
+
+仕様:
+- discover_repositories: apps_rootおよびobsidian_repoからGitリポジトリを自動検出し設定に登録
+- add_repository: 指定されたGitリポジトリのパスや設定を手動で登録
+- delete_repository: 登録済みリポジトリを設定から削除
+- update_repository: リポジトリのブランチや初期導入地点、有効無効状態を更新
+- scan_repositories: 登録済みリポジトリの未公開コミット数やクリーン状態を取得
+- publish: 登録済みで有効なリポジトリの差分パッチを作成・署名・分割し、パッチリポジトリへpush
+"""
 from __future__ import annotations
 
 import json
@@ -80,6 +91,64 @@ def scan_repositories(settings: Settings) -> list[dict[str, Any]]:
             item.update({"clean": False, "error": str(exc), "unpublished_commits": 0})
         result.append(item)
     return result
+
+
+def add_repository(
+    settings: Settings, store: SettingsStore, payload: dict[str, Any]
+) -> dict[str, Any]:
+    raw_path = payload.get("path", "").strip()
+    if not raw_path:
+        raise RepPatchError("リポジトリのパスを指定してください")
+    path = Path(raw_path).expanduser().resolve()
+    if not path.is_dir():
+        raise RepPatchError(f"Gitリポジトリが見つかりません: {raw_path}")
+    result = run_git(path, ["rev-parse", "--is-inside-work-tree"], check=False)
+    if result.returncode != 0 or result.text != "true":
+        raise RepPatchError(f"指定されたディレクトリはGitリポジトリではありません: {raw_path}")
+
+    kind = payload.get("kind") or ("obsidian" if "obsidian" in path.name.lower() else "app")
+    display_name = payload.get("display_name", "").strip() or path.name
+    repo_id = payload.get("repo_id", "").strip() or (
+        "obsidian-settings" if kind == "obsidian" and path.name.lower().startswith("obsidian") else repo_id_for(display_name)
+    )
+
+    branch = payload.get("branch", "").strip()
+    if not branch:
+        branch_res = run_git(path, ["symbolic-ref", "--short", "HEAD"], check=False)
+        if branch_res.returncode == 0 and branch_res.text:
+            branch = branch_res.text
+        else:
+            abbrev_res = run_git(path, ["rev-parse", "--abbrev-ref", "HEAD"], check=False)
+            branch = abbrev_res.text if abbrev_res.returncode == 0 and abbrev_res.text and abbrev_res.text != "HEAD" else "main"
+
+    baseline_commit = payload.get("baseline_commit", "").strip()
+    if baseline_commit:
+        baseline_commit = resolve_commit(path, baseline_commit)
+
+    enabled = bool(payload.get("enabled", True))
+
+    config = RepositoryConfig(
+        repo_id=repo_id,
+        display_name=display_name,
+        path=str(path),
+        kind=kind,
+        enabled=enabled,
+        branch=branch,
+        baseline_commit=baseline_commit,
+    )
+    settings.repositories[repo_id] = config
+    store.save(settings)
+    return asdict(config)
+
+
+def delete_repository(
+    settings: Settings, store: SettingsStore, repo_id: str
+) -> dict[str, Any]:
+    if repo_id not in settings.repositories:
+        raise RepPatchError(f"リポジトリが登録されていません: {repo_id}")
+    del settings.repositories[repo_id]
+    store.save(settings)
+    return {"deleted": True, "repo_id": repo_id}
 
 
 def update_repository(

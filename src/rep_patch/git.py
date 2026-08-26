@@ -1,3 +1,13 @@
+"""
+Gitコマンド実行およびリポジトリ状態解析を行うユーティリティモジュール
+
+仕様:
+- run_git: Gitサブプロセスの安全な実行と結果取得
+- repository_status: ワークツリーのクリーン状態・変更ファイル数の取得
+- resolve_commit: ブランチ名・タグ・HEAD・コミットハッシュの完全ID解決
+- is_ancestor: コミット間の祖先関係判定
+- tracked_files / changed_paths: 追跡対象ファイル一覧およびコミット間差分ファイル取得
+"""
 from __future__ import annotations
 
 import subprocess

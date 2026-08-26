@@ -1,3 +1,11 @@
+"""
+Myao Patch Bridge CLI エントリポイント
+
+仕様:
+- 設定ファイル（settings.local.json）の読み込み
+- ブラウザ自動起動（--no-browser で無効化可能）
+- uvicorn によるローカルWebサーバー起動
+"""
 from __future__ import annotations
 
 import argparse

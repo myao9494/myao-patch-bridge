@@ -1,3 +1,11 @@
+"""
+パッチパッケージの署名生成・検証およびパス検証を行うセキュリティモジュール
+
+仕様:
+- sha256_bytes / sha256_file: ハッシュ計算
+- sign_document / verify_document: HMAC-SHA256 によるマニフェスト・インデックス署名検証
+- safe_repo_path: パストラバーサル防止および安全な相対パス解決
+"""
 from __future__ import annotations
 
 import hashlib

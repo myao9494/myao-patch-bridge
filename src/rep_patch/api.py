@@ -1,3 +1,15 @@
+"""
+Myao Patch Bridge のローカル REST API サーバー
+
+仕様:
+- ローカル限定アクセス（127.0.0.1）およびCSRF保護用セッショントークン検証
+- 設定管理（GET/PUT /api/settings）
+- リポジトリ管理（GET /api/repositories, POST /api/repositories, PUT /api/repositories/{repo_id}, DELETE /api/repositories/{repo_id}, POST /api/repositories/discover）
+- 自宅パッチ公開（POST /api/home/publish）
+- 会社パッチ適用・検証・コミット（GET /api/company/downloads, POST /api/company/inspect, POST /api/company/apply-all, POST /api/company/retry, POST /api/company/commit-pending）
+- 診断機能（GET /api/diagnostics）
+- フロントエンドSPA配信
+"""
 from __future__ import annotations
 
 import secrets
@@ -18,11 +30,27 @@ from .company import (
 from .config import PROJECT_ROOT, SettingsStore
 from .diagnostics import run_diagnostics
 from .errors import RepPatchError
-from .home import discover_repositories, publish, scan_repositories, update_repository
+from .home import (
+    add_repository,
+    delete_repository,
+    discover_repositories,
+    publish,
+    scan_repositories,
+    update_repository,
+)
 
 
 class SettingsUpdate(BaseModel):
     values: dict[str, Any]
+
+
+class RepositoryCreate(BaseModel):
+    path: str
+    display_name: str = ""
+    kind: str = "app"
+    branch: str = ""
+    baseline_commit: str = ""
+    enabled: bool = True
 
 
 class RepositoryUpdate(BaseModel):
@@ -102,10 +130,20 @@ def create_app(store: SettingsStore | None = None) -> FastAPI:
     def repositories() -> dict[str, Any]:
         return {"repositories": scan_repositories(settings_store.load())}
 
+    @app.post("/api/repositories")
+    def post_repository(payload: RepositoryCreate) -> dict[str, Any]:
+        settings = settings_store.load()
+        return add_repository(settings, settings_store, payload.model_dump())
+
     @app.put("/api/repositories/{repo_id}")
     def put_repository(repo_id: str, payload: RepositoryUpdate) -> dict[str, Any]:
         settings = settings_store.load()
         return update_repository(settings, settings_store, repo_id, payload.values)
+
+    @app.delete("/api/repositories/{repo_id}")
+    def delete_repo(repo_id: str) -> dict[str, Any]:
+        settings = settings_store.load()
+        return delete_repository(settings, settings_store, repo_id)
 
     @app.post("/api/home/publish")
     def publish_patches() -> dict[str, Any]:

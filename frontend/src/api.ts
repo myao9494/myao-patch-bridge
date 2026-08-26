@@ -1,3 +1,10 @@
+/**
+ * バックエンドREST API通信クライアント
+ * 
+ * 仕様:
+ * - セッショントークンの自動取得と X-Rep-Patch-Token ヘッダー付与
+ * - エラーハンドリングおよびJSONリクエスト/レスポンス処理
+ */
 let token = "";
 
 async function sessionToken(): Promise<string> {

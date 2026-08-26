@@ -1,3 +1,11 @@
+"""
+パッチパッケージの分割・保存・復元およびZIPアーカイブ処理を行うモジュール
+
+仕様:
+- SCHEMA_VERSION: パッケージ仕様バージョン
+- split_patch: 指定サイズごとのバイナリパッチ分割処理
+- PatchArchive: パッチZIPの安全な検証・展開・再構築
+"""
 from __future__ import annotations
 
 import hashlib

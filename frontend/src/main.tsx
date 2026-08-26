@@ -1,3 +1,10 @@
+/**
+ * React アプリケーションのエントリポイント
+ * 
+ * 仕様:
+ * - ServiceWorker の登録（本番ビルド時）
+ * - ルートコンポーネント App のレンダリング
+ */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";

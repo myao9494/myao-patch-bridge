@@ -1,3 +1,12 @@
+"""
+会社環境でのパッチZIP検証・適用・バックアップ・コミット処理を行うモジュール
+
+仕様:
+- list_download_packages: ダウンロードフォルダからパッチZIP一覧を取得
+- inspect_archive: ZIP内の署名・SHA-256・メタデータおよび会社側リポジトリ対応状況を検証
+- apply_archive: 各アプリへパッチを未コミット状態で適用し、安全なロールバック用バックアップを保持
+- commit_pending: 動作確認済みの保留中パッチをGitコミット
+"""
 from __future__ import annotations
 
 import shutil

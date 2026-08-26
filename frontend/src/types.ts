@@ -1,3 +1,14 @@
+/**
+ * Myao Patch Bridge UI 共通型定義
+ * 
+ * 仕様:
+ * - Mode: 自宅（home）または会社（company）の動作モード
+ * - Repository: リポジトリの各種設定・Git状態（未公開コミット数等）
+ * - RepositoryCreatePayload: リポジトリ手動追加リクエスト
+ * - Settings: アプリケーション全体設定
+ * - PackageSummary / DownloadPackage / OperationResult: パッチ送受信・適用関連型定義
+ */
+
 export type Mode = "home" | "company";
 
 export interface Repository {
@@ -14,6 +25,15 @@ export interface Repository {
   changes?: number;
   unpublished_commits?: number;
   error?: string;
+}
+
+export interface RepositoryCreatePayload {
+  path: string;
+  display_name?: string;
+  kind?: "app" | "obsidian";
+  branch?: string;
+  baseline_commit?: string;
+  enabled?: boolean;
 }
 
 export interface Settings {
