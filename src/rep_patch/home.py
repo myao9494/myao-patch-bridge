@@ -271,7 +271,8 @@ def publish(settings: Settings, store: SettingsStore) -> dict[str, Any]:
         diff_status = diff_file_status(repo, source, target)
         added_records: list[dict[str, Any]] = []
         added_files_dir = target_dir / "added_files"
-        for rel_path in diff_status["added"]:
+        files_to_bundle = sorted(set(diff_status["added"] + diff_status["modified"]))
+        for rel_path in files_to_bundle:
             file_bytes = run_git(repo, ["show", f"{target}:{rel_path}"]).stdout
             file_target = added_files_dir / rel_path
             file_target.parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +284,7 @@ def publish(settings: Settings, store: SettingsStore) -> dict[str, Any]:
                     "sha256": sha256_bytes(file_bytes),
                 }
             )
+
 
         manifest = sign_document(
             {
