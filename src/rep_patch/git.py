@@ -7,6 +7,7 @@ Gitコマンド実行およびリポジトリ状態解析を行うユーティ�
 - resolve_commit: ブランチ名・タグ・HEAD・コミットハッシュの完全ID解決
 - is_ancestor: コミット間の祖先関係判定
 - tracked_files / changed_paths: 追跡対象ファイル一覧およびコミット間差分ファイル取得
+- diff_file_status: コミット間の追加・変更・削除ファイル一覧の分類取得
 """
 from __future__ import annotations
 
@@ -129,3 +130,44 @@ def changed_paths(path: Path, older: str, newer: str) -> list[str]:
         for item in raw.split(b"\0")
         if item
     )
+
+
+def diff_file_status(path: Path, older: str, newer: str) -> dict[str, list[str]]:
+    raw = run_git(path, ["diff", "--name-status", "-z", older, newer, "--"]).stdout
+    parts = raw.split(b"\0")
+    added: list[str] = []
+    modified: list[str] = []
+    deleted: list[str] = []
+    i = 0
+    while i < len(parts):
+        token = parts[i]
+        if not token:
+            i += 1
+            continue
+        status_code = token.decode("ascii", errors="replace")
+        if status_code.startswith("R") or status_code.startswith("C"):
+            if i + 2 >= len(parts):
+                break
+            old_path = parts[i + 1].decode("utf-8", errors="surrogateescape")
+            new_path = parts[i + 2].decode("utf-8", errors="surrogateescape")
+            if status_code.startswith("R"):
+                deleted.append(old_path)
+            added.append(new_path)
+            i += 3
+        else:
+            if i + 1 >= len(parts):
+                break
+            file_path = parts[i + 1].decode("utf-8", errors="surrogateescape")
+            if status_code == "A":
+                added.append(file_path)
+            elif status_code == "D":
+                deleted.append(file_path)
+            else:
+                modified.append(file_path)
+            i += 2
+    return {
+        "added": sorted(set(added)),
+        "modified": sorted(set(modified)),
+        "deleted": sorted(set(deleted)),
+    }
+

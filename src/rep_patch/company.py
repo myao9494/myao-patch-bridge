@@ -4,7 +4,7 @@
 仕様:
 - list_download_packages: ダウンロードフォルダからパッチZIP一覧を取得
 - inspect_archive: ZIP内の署名・SHA-256・メタデータおよび会社側リポジトリ対応状況を検証
-- apply_archive: 各アプリへパッチを未コミット状態で適用し、安全なロールバック用バックアップを保持
+- apply_archive: 各アプリへパッチを未コミット状態で適用（新規ファイル自動配置・削除ファイル処理・安全なバックアップ保持）
 - commit_pending: 動作確認済みの保留中パッチをGitコミット
 """
 from __future__ import annotations
@@ -256,9 +256,13 @@ def _apply_packages(
 
     expected = (pending_before[-1] if pending_before else int(state["confirmed_sequence"])) + 1
     _check_sequence(packages, expected)
-    changed = list(state.get("pending_changed_paths", [])) + [
-        path for package in packages for path in package.manifest["changed_paths"]
-    ]
+    changed = list(state.get("pending_changed_paths", []))
+    for package in packages:
+        changed.extend(package.manifest.get("changed_paths", []))
+        for item in package.manifest.get("added_files", []):
+            if isinstance(item, dict) and "path" in item:
+                changed.append(item["path"])
+        changed.extend(package.manifest.get("deleted_files", []))
     session_backup = _backup_paths(repo, changed)
     original_backup = state.get("backup_dir", "")
     try:
@@ -267,6 +271,20 @@ def _apply_packages(
             with archive.reconstructed_patch(package, temporary_dir) as patch_path:
                 run_git(repo, ["apply", "--check", "--index", "--binary", str(patch_path)])
                 run_git(repo, ["apply", "--index", "--binary", str(patch_path)])
+
+            # 新規追加ファイルの実体を自動配置
+            for record in package.manifest.get("added_files", []):
+                file_rel = record["path"]
+                content = archive.read_added_file(package, file_rel)
+                target_file = safe_repo_path(repo, file_rel)
+                target_file.parent.mkdir(parents=True, exist_ok=True)
+                target_file.write_bytes(content)
+
+            # 削除対象ファイルを確実に消去
+            for del_rel in package.manifest.get("deleted_files", []):
+                del_target = safe_repo_path(repo, del_rel)
+                del_target.unlink(missing_ok=True)
+
         _validate_index(repo, packages[-1].manifest["target_files"])
         run_git(repo, ["reset", "--mixed", "HEAD"])
     except Exception:
@@ -392,3 +410,5 @@ def company_status(settings: Settings, archive: PatchArchive | None = None) -> l
         except Exception as exc:  # noqa: BLE001 - return status for every repository
             result.append({**manifest, "state": {}, "company_path": "", "error": str(exc)})
     return result
+
+

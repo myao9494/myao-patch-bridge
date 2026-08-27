@@ -1,6 +1,14 @@
+"""
+APIエンドポイントおよびPWA配信セキュリティのテスト
+
+仕様:
+- test_api_requires_session_token_for_mutation: 状態変更APIに対するセッショントークン検証
+- test_pwa_is_served_with_local_only_security_headers: PWA静的ファイル配信とローカル専用セキュリティヘッダーの検証
+"""
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+
 
 from rep_patch.api import create_app
 from rep_patch.config import SettingsStore

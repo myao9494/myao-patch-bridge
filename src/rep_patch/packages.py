@@ -4,7 +4,7 @@
 仕様:
 - SCHEMA_VERSION: パッケージ仕様バージョン
 - split_patch: 指定サイズごとのバイナリパッチ分割処理
-- PatchArchive: パッチZIPの安全な検証・展開・再構築
+- PatchArchive: パッチZIPの安全な検証・展開・再構築および追加ファイル読み込み
 """
 from __future__ import annotations
 
@@ -182,6 +182,7 @@ class PatchArchive:
                 raise PackageValidationError(f"パッケージ連番が重複しています: {key}")
             seen.add(key)
             self._verify_chunks(relative, manifest)
+            self._verify_added_files(relative, manifest)
             result.append(ArchivePackage(relative, manifest))
         return sorted(result, key=lambda package: (package.manifest["repo_id"], package.manifest["sequence"]))
 
@@ -217,6 +218,29 @@ class PatchArchive:
             raise PackageValidationError("復元パッチのサイズが一致しません")
         if digest.hexdigest() != manifest.get("patch_sha256"):
             raise PackageValidationError("復元パッチのSHA-256が一致しません")
+
+    def _verify_added_files(self, manifest_path: str, manifest: dict[str, Any]) -> None:
+        added_files = manifest.get("added_files")
+        if added_files is None:
+            return
+        if not isinstance(added_files, list):
+            raise PackageValidationError(f"added_filesが不正です: {manifest_path}")
+        base = PurePosixPath(manifest_path).parent
+        for record in added_files:
+            if not isinstance(record, dict):
+                raise PackageValidationError(f"added_filesの要素が不正です: {manifest_path}")
+            raw_path = str(record.get("path", ""))
+            safe_path = str(safe_relative_path(raw_path))
+            archive_name = self.root_prefix + str(base / "added_files" / safe_path)
+            content = self._read_limited(archive_name, 500 * 1024 * 1024)
+            if len(content) != int(record.get("size", -1)) or sha256_bytes(content) != record.get("sha256"):
+                raise PackageValidationError(f"追加ファイルが破損しています: {safe_path}")
+
+    def read_added_file(self, package: ArchivePackage, relative_path: str) -> bytes:
+        base = PurePosixPath(package.manifest_path).parent
+        safe_path = str(safe_relative_path(relative_path))
+        archive_name = self.root_prefix + str(base / "added_files" / safe_path)
+        return self._read_limited(archive_name, 500 * 1024 * 1024)
 
     def package_groups(self) -> dict[str, list[ArchivePackage]]:
         result: dict[str, list[ArchivePackage]] = {}
@@ -260,3 +284,4 @@ class PatchArchive:
                 for repo_id, packages in groups.items()
             ],
         }
+

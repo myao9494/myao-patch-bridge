@@ -1,6 +1,15 @@
+"""
+署名検証およびパス安全性判定のテスト
+
+仕様:
+- test_hmac_signature_detects_changes: HMAC署名による改ざん検知の検証
+- test_unsafe_relative_paths_are_rejected: パストラバーサル防止の検証
+- test_normal_relative_path_is_allowed: 正常な相対パスの許可検証
+"""
 from __future__ import annotations
 
 import copy
+
 
 import pytest
 

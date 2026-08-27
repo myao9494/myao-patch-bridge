@@ -7,7 +7,7 @@
 - delete_repository: 登録済みリポジトリを設定から削除
 - update_repository: リポジトリのブランチや初期導入地点、有効無効状態を更新
 - scan_repositories: 登録済みリポジトリの未公開コミット数やクリーン状態を取得
-- publish: 登録済みで有効なリポジトリの差分パッチを作成・署名・分割し、パッチリポジトリへpush
+- publish: 登録済みで有効なリポジトリの差分パッチ作成・新規ファイル実体同梱・削除記録・署名・分割し、パッチリポジトリへpush
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from .config import PROJECT_ROOT, RepositoryConfig, Settings, SettingsStore
 from .errors import RepPatchError
 from .git import (
     changed_paths,
+    diff_file_status,
     ensure_repository,
     is_ancestor,
     repository_status,
@@ -266,6 +267,23 @@ def publish(settings: Settings, store: SettingsStore) -> dict[str, Any]:
         relative_dir = Path("packages") / config.repo_id / f"{sequence:06d}"
         target_dir = patch_root / relative_dir
         chunks = split_patch(patch, target_dir, settings.chunk_size_mib * 1024 * 1024)
+
+        diff_status = diff_file_status(repo, source, target)
+        added_records: list[dict[str, Any]] = []
+        added_files_dir = target_dir / "added_files"
+        for rel_path in diff_status["added"]:
+            file_bytes = run_git(repo, ["show", f"{target}:{rel_path}"]).stdout
+            file_target = added_files_dir / rel_path
+            file_target.parent.mkdir(parents=True, exist_ok=True)
+            file_target.write_bytes(file_bytes)
+            added_records.append(
+                {
+                    "path": rel_path,
+                    "size": len(file_bytes),
+                    "sha256": sha256_bytes(file_bytes),
+                }
+            )
+
         manifest = sign_document(
             {
                 "schema_version": SCHEMA_VERSION,
@@ -281,6 +299,8 @@ def publish(settings: Settings, store: SettingsStore) -> dict[str, Any]:
                 "patch_sha256": sha256_bytes(patch),
                 "chunks": chunks,
                 "changed_paths": changed_paths(repo, source, target),
+                "added_files": added_records,
+                "deleted_files": diff_status["deleted"],
                 "target_files": tracked_files(repo, target),
             },
             settings.patch_password,
@@ -312,3 +332,4 @@ def publish(settings: Settings, store: SettingsStore) -> dict[str, Any]:
         "message": f"{len(created)}件のパッチを公開しました",
         "packages": created,
     }
+

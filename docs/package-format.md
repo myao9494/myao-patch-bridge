@@ -10,7 +10,9 @@ myao_app_patch-main/
     │   ├── 000001/
     │   │   ├── manifest.json
     │   │   ├── changes.patch.part-000001
-    │   │   └── changes.patch.part-000002
+    │   │   ├── changes.patch.part-000002
+    │   │   └── added_files/
+    │   │       └── path/to/new_file.txt
     │   └── 000002/
     └── obsidian-settings/
 ```
@@ -53,8 +55,11 @@ Patch Appはパッチ専用リポジトリの `.gitattributes` に `*.patch.part
 | `patch_sha256` | 分割前パッチのSHA-256 |
 | `chunks` | 分割名、サイズ、SHA-256、順序 |
 | `changed_paths` | バックアップ対象パス |
+| `added_files` | 新規追加ファイルの一覧（相対パス、サイズ、SHA-256） |
+| `deleted_files` | 削除されたファイルの一覧 |
 | `target_files` | 適用後の全tracked path/blob |
 | `signature` | マニフェストのHMAC-SHA-256 |
+
 
 ## 連番
 
