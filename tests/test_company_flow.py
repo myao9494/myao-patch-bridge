@@ -49,7 +49,7 @@ def make_package_repo(
         status = diff_file_status(source, older, newer)
         added_records = []
         added_files_dir = package_dir / "added_files"
-        for rel_path in status["added"]:
+        for rel_path in sorted(set(status["added"] + status["modified"])):
             content = git(source, "show", f"{newer}:{rel_path}")
             target_file = added_files_dir / rel_path
             target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -61,6 +61,7 @@ def make_package_repo(
                     "sha256": sha256_bytes(content),
                 }
             )
+
 
         manifest = sign_document(
             {

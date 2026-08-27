@@ -75,11 +75,15 @@ def test_publish_creates_package_pushes_and_advances_cursor(tmp_path: Path, git_
     assert store.load().repositories["sample-app"].published_commit == target
     assert git(patch_repo, "rev-list", "--count", "@{u}..HEAD").decode().strip() == "0"
 
-    # 新規追加ファイルの実体が同梱されているか検証
+    # 差分ファイル（新規追加および変更ファイル）の実体が同梱されているか検証
     assert "added_files" in manifest
     added_paths = [item["path"] for item in manifest["added_files"]]
+    assert "app.txt" in added_paths
     assert "nested/sub/new_file.txt" in added_paths
     assert "binary.bin" in added_paths
+    assert (package_dir / "added_files" / "app.txt").read_text(
+        encoding="utf-8"
+    ) == "published change\n"
     assert (package_dir / "added_files" / "nested" / "sub" / "new_file.txt").read_text(
         encoding="utf-8"
     ) == "new nested content\n"
@@ -88,4 +92,5 @@ def test_publish_creates_package_pushes_and_advances_cursor(tmp_path: Path, git_
     # 削除ファイルが記録されているか検証
     assert "deleted_files" in manifest
     assert "to_delete.txt" in manifest["deleted_files"]
+
 
