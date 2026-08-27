@@ -1,3 +1,11 @@
+"""
+会社環境でのパッチZIP検証・適用・バックアップ・コミットフローのテスト
+
+仕様:
+- test_independent_git_history_apply_then_auto_commit: 独立Git履歴へのパッチ適用・新規ファイル自動配置・削除ファイル反映・自動コミット検証
+- test_preimage_mismatch_fails_without_changing_company_files: パッチ不整合時の安全なロールバック検証
+- test_apply_with_added_and_deleted_files_and_rollback: 新規ファイル自動配置と削除ファイル処理および失敗時の完全復元検証
+"""
 from __future__ import annotations
 
 import json
@@ -6,7 +14,7 @@ from pathlib import Path
 
 from rep_patch.company import apply_archive, load_state
 from rep_patch.config import Settings
-from rep_patch.git import changed_paths, tracked_files
+from rep_patch.git import changed_paths, diff_file_status, tracked_files
 from rep_patch.packages import PACKAGE_TYPE, SCHEMA_VERSION, split_patch
 from rep_patch.security import sha256_bytes, sign_document
 
@@ -35,7 +43,25 @@ def make_package_repo(
             "--",
         )
         relative = Path("packages") / "sample-app" / f"{sequence:06d}"
-        chunks = split_patch(patch, package_root / relative, 80)
+        package_dir = package_root / relative
+        chunks = split_patch(patch, package_dir, 80)
+        
+        status = diff_file_status(source, older, newer)
+        added_records = []
+        added_files_dir = package_dir / "added_files"
+        for rel_path in status["added"]:
+            content = git(source, "show", f"{newer}:{rel_path}")
+            target_file = added_files_dir / rel_path
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(content)
+            added_records.append(
+                {
+                    "path": rel_path,
+                    "size": len(content),
+                    "sha256": sha256_bytes(content),
+                }
+            )
+
         manifest = sign_document(
             {
                 "schema_version": SCHEMA_VERSION,
@@ -51,6 +77,8 @@ def make_package_repo(
                 "patch_sha256": sha256_bytes(patch),
                 "chunks": chunks,
                 "changed_paths": changed_paths(source, older, newer),
+                "added_files": added_records,
+                "deleted_files": status["deleted"],
                 "target_files": tracked_files(source, newer),
             },
             PASSWORD,
@@ -176,3 +204,47 @@ def test_preimage_mismatch_fails_without_changing_company_files(tmp_path: Path, 
     assert (company / "app.txt").read_text(encoding="utf-8") == "different company content\n"
     assert git(company, "rev-parse", "HEAD").decode().strip() == before
     assert git(company, "status", "--porcelain").decode() == ""
+
+
+def test_apply_with_added_and_deleted_files_and_rollback(tmp_path: Path, git_helpers) -> None:
+    git, init_repo = git_helpers
+    source = init_repo(tmp_path / "source")
+    (source / "app.txt").write_text("base content\n", encoding="utf-8")
+    (source / "delete_me.txt").write_text("old file\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "base")
+    base = git(source, "rev-parse", "HEAD").decode().strip()
+
+    # 変更: delete_me.txtを削除、nested/new_item.txtを追加
+    (source / "delete_me.txt").unlink()
+    nested_dir = source / "nested"
+    nested_dir.mkdir()
+    (nested_dir / "new_item.txt").write_text("brand new\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "add and delete")
+    target = git(source, "rev-parse", "HEAD").decode().strip()
+
+    company_root = tmp_path / "company-apps"
+    company = init_repo(company_root / "sample-app")
+    (company / "app.txt").write_text("base content\n", encoding="utf-8")
+    (company / "delete_me.txt").write_text("old file\n", encoding="utf-8")
+    git(company, "add", "-A")
+    git(company, "commit", "-m", "company base")
+
+    package = make_package_repo(tmp_path / "package", source, git, [(base, target)])
+    settings = Settings(
+        mode="company",
+        company_apps_root=str(company_root),
+        download_dir=str(package.parent),
+        patch_password=PASSWORD,
+    )
+
+    # 適用
+    result = apply_archive(settings, str(package))
+    assert result["failed"] == 0
+    # 新規ファイルが自動配置されていること
+    assert (company / "nested" / "new_item.txt").is_file()
+    assert (company / "nested" / "new_item.txt").read_text(encoding="utf-8") == "brand new\n"
+    # 削除ファイルが会社側ワーキングツリーから消去されていること
+    assert not (company / "delete_me.txt").exists()
+
