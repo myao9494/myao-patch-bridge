@@ -5,6 +5,7 @@
 - test_independent_git_history_apply_then_auto_commit: 独立Git履歴へのパッチ適用・新規ファイル自動配置・削除ファイル反映・自動コミット検証
 - test_preimage_mismatch_fails_without_changing_company_files: パッチ不整合時の安全なロールバック検証
 - test_apply_with_added_and_deleted_files_and_rollback: 新規ファイル自動配置と削除ファイル処理および失敗時の完全復元検証
+- test_force_overwrite_and_delete_applies_directly: git applyを使わずファイル直接上書き配置と削除で同期するテスト
 """
 from __future__ import annotations
 
@@ -248,4 +249,49 @@ def test_apply_with_added_and_deleted_files_and_rollback(tmp_path: Path, git_hel
     assert (company / "nested" / "new_item.txt").read_text(encoding="utf-8") == "brand new\n"
     # 削除ファイルが会社側ワーキングツリーから消去されていること
     assert not (company / "delete_me.txt").exists()
+
+
+def test_force_overwrite_and_delete_applies_directly(tmp_path: Path, git_helpers) -> None:
+    """git applyを使わずにファイルを直接強制上書き・新規配置・削除して未コミット状態にするテスト"""
+    git, init_repo = git_helpers
+    source = init_repo(tmp_path / "source")
+    (source / "file_mod.txt").write_text("source v1\n", encoding="utf-8")
+    (source / "file_del.txt").write_text("will be deleted\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "v1")
+    base = git(source, "rev-parse", "HEAD").decode().strip()
+
+    # 自宅側で変更、削除、追加
+    (source / "file_mod.txt").write_text("source v2 changed\n", encoding="utf-8")
+    (source / "file_del.txt").unlink()
+    (source / "file_new.txt").write_text("brand new file\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "v2")
+    target = git(source, "rev-parse", "HEAD").decode().strip()
+
+    company_root = tmp_path / "company-apps"
+    company = init_repo(company_root / "sample-app")
+    # 会社側で異なる内容（git diffのコンテキストが一致しない状態）
+    (company / "file_mod.txt").write_text("company modified locally\n", encoding="utf-8")
+    (company / "file_del.txt").write_text("company del file\n", encoding="utf-8")
+    git(company, "add", "-A")
+    git(company, "commit", "-m", "company commit")
+
+    package = make_package_repo(tmp_path / "package", source, git, [(base, target)])
+    settings = Settings(
+        mode="company",
+        company_apps_root=str(company_root),
+        download_dir=str(package.parent),
+        patch_password=PASSWORD,
+    )
+
+    result = apply_archive(settings, str(package))
+    assert result["failed"] == 0
+    # 強制上書きされていること
+    assert (company / "file_mod.txt").read_text(encoding="utf-8") == "source v2 changed\n"
+    # 新規配置されていること
+    assert (company / "file_new.txt").read_text(encoding="utf-8") == "brand new file\n"
+    # 削除ファイルが削除されていること
+    assert not (company / "file_del.txt").exists()
+
 
