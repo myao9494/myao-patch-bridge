@@ -67,19 +67,19 @@ Git管理対象外なので、手動コミットやPatch App更新の影響を�
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Clean
-    Clean --> Checked: git apply --check --index
-    Checked --> Staged: git apply --index
+    [*] --> Clean: 開始
+    Clean --> Applied: ファイル直接上書き配置・削除
+    Applied --> Staged: git add -A
     Staged --> Verified: 全tracked blobを照合
     Verified --> Pending: git resetでステージ解除
     Pending --> Committed: ユーザーが確認して次回操作
     Committed --> Clean: 自動commit完了
-    Checked --> Restored: 失敗
+    Applied --> Restored: 失敗
     Staged --> Restored: 失敗
     Restored --> Clean: バックアップ復元
 ```
 
-全アプリ適用はリポジトリ単位の独立トランザクションです。1つが失敗しても、そのアプリだけ復元し、他のアプリは続行します。
+全アプリ適用はリポジトリ単位の独立トランザクションです。1つが失敗しても、そのアプリだけ復元し、他のアプリは続行します。`git apply` を使わずファイル実体を直接上書き配置・削除するため、パッチ形式や改行コード差分による適用失敗を回避します。
 
 ## React PWA
 

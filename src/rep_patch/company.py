@@ -4,7 +4,7 @@
 仕様:
 - list_download_packages: ダウンロードフォルダからパッチZIP一覧を取得
 - inspect_archive: ZIP内の署名・SHA-256・メタデータおよび会社側リポジトリ対応状況を検証
-- apply_archive: 各アプリへパッチを未コミット状態で適用（新規ファイル自動配置・削除ファイル処理・安全なバックアップ保持）
+- apply_archive: 各アプリへパッチを未コミット状態で適用（変更・新規ファイル直接上書き配置・削除ファイル消去・安全なバックアップ保持）
 - commit_pending: 動作確認済みの保留中パッチをGitコミット
 """
 from __future__ import annotations
@@ -266,13 +266,8 @@ def _apply_packages(
     session_backup = _backup_paths(repo, changed)
     original_backup = state.get("backup_dir", "")
     try:
-        temporary_dir = _git_dir(repo) / "rep-patch" / "tmp"
         for package in packages:
-            with archive.reconstructed_patch(package, temporary_dir) as patch_path:
-                run_git(repo, ["apply", "--check", "--index", "--binary", str(patch_path)])
-                run_git(repo, ["apply", "--index", "--binary", str(patch_path)])
-
-            # 新規追加ファイルの実体を自動配置
+            # 変更・新規追加ファイルの実体を直接上書き配置
             for record in package.manifest.get("added_files", []):
                 file_rel = record["path"]
                 content = archive.read_added_file(package, file_rel)
@@ -285,6 +280,8 @@ def _apply_packages(
                 del_target = safe_repo_path(repo, del_rel)
                 del_target.unlink(missing_ok=True)
 
+        # ワークツリーの全変更をインデックスへ反映し検証
+        run_git(repo, ["add", "-A"])
         _validate_index(repo, packages[-1].manifest["target_files"])
         run_git(repo, ["reset", "--mixed", "HEAD"])
     except Exception:

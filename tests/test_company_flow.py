@@ -3,7 +3,7 @@
 
 仕様:
 - test_independent_git_history_apply_then_auto_commit: 独立Git履歴へのパッチ適用・新規ファイル自動配置・削除ファイル反映・自動コミット検証
-- test_preimage_mismatch_fails_without_changing_company_files: パッチ不整合時の安全なロールバック検証
+- test_unexpected_files_fails_without_changing_company_files: 想定外ファイル存在時のロールバック検証
 - test_apply_with_added_and_deleted_files_and_rollback: 新規ファイル自動配置と削除ファイル処理および失敗時の完全復元検証
 - test_force_overwrite_and_delete_applies_directly: git applyを使わずファイル直接上書き配置と削除で同期するテスト
 """
@@ -175,7 +175,8 @@ def test_independent_git_history_apply_then_auto_commit(tmp_path: Path, git_help
     assert state["pending_sequences"] == [2]
 
 
-def test_preimage_mismatch_fails_without_changing_company_files(tmp_path: Path, git_helpers) -> None:
+def test_unexpected_files_fails_without_changing_company_files(tmp_path: Path, git_helpers) -> None:
+    """想定外のファイル差分がある場合は適用が失敗し、会社側ファイルが元通り復元されるテスト"""
     git, init_repo = git_helpers
     source = init_repo(tmp_path / "source")
     (source / "app.txt").write_text("expected base\n", encoding="utf-8")
@@ -189,9 +190,10 @@ def test_preimage_mismatch_fails_without_changing_company_files(tmp_path: Path, 
 
     company_root = tmp_path / "company-apps"
     company = init_repo(company_root / "sample-app")
-    (company / "app.txt").write_text("different company content\n", encoding="utf-8")
+    (company / "app.txt").write_text("expected base\n", encoding="utf-8")
+    (company / "unexpected_extra.txt").write_text("unexpected\n", encoding="utf-8")
     git(company, "add", "-A")
-    git(company, "commit", "-m", "different base")
+    git(company, "commit", "-m", "company base with extra file")
     before = git(company, "rev-parse", "HEAD").decode().strip()
 
     package = make_package_repo(tmp_path / "package", source, git, [(base, target)])
@@ -203,7 +205,8 @@ def test_preimage_mismatch_fails_without_changing_company_files(tmp_path: Path, 
     )
     result = apply_archive(settings, str(package))
     assert result["failed"] == 1
-    assert (company / "app.txt").read_text(encoding="utf-8") == "different company content\n"
+    assert (company / "app.txt").read_text(encoding="utf-8") == "expected base\n"
+    assert (company / "unexpected_extra.txt").read_text(encoding="utf-8") == "unexpected\n"
     assert git(company, "rev-parse", "HEAD").decode().strip() == before
     assert git(company, "status", "--porcelain").decode() == ""
 
