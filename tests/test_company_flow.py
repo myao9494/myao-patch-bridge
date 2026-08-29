@@ -6,6 +6,8 @@
 - test_unexpected_files_fails_without_changing_company_files: 想定外ファイル存在時のロールバック検証
 - test_apply_with_added_and_deleted_files_and_rollback: 新規ファイル自動配置と削除ファイル処理および失敗時の完全復元検証
 - test_force_overwrite_and_delete_applies_directly: git applyを使わずファイル直接上書き配置と削除で同期するテスト
+- test_single_repository_commit_pending: リポジトリID指定での個別コミット検証
+- test_list_company_repositories: 会社側リポジトリ一覧および状態取得の検証
 """
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ import json
 import zipfile
 from pathlib import Path
 
-from rep_patch.company import apply_archive, load_state
+from rep_patch.company import apply_archive, commit_pending, list_company_repositories, load_state
 from rep_patch.config import Settings
 from rep_patch.git import changed_paths, diff_file_status, tracked_files
 from rep_patch.packages import PACKAGE_TYPE, SCHEMA_VERSION, split_patch
@@ -296,5 +298,84 @@ def test_force_overwrite_and_delete_applies_directly(tmp_path: Path, git_helpers
     assert (company / "file_new.txt").read_text(encoding="utf-8") == "brand new file\n"
     # 削除ファイルが削除されていること
     assert not (company / "file_del.txt").exists()
+
+
+def test_single_repository_commit_pending(tmp_path: Path, git_helpers) -> None:
+    """特定のリポジトリIDを指定して個別コミットが正しく完了するテスト"""
+    git, init_repo = git_helpers
+    source = init_repo(tmp_path / "source")
+    (source / "app.txt").write_text("v1\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "v1")
+    base = git(source, "rev-parse", "HEAD").decode().strip()
+
+    (source / "app.txt").write_text("v2\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "v2")
+    target = git(source, "rev-parse", "HEAD").decode().strip()
+
+    company_root = tmp_path / "company-apps"
+    company = init_repo(company_root / "sample-app")
+    (company / "app.txt").write_text("v1\n", encoding="utf-8")
+    git(company, "add", "-A")
+    git(company, "commit", "-m", "company v1")
+
+    package = make_package_repo(tmp_path / "package", source, git, [(base, target)])
+    settings = Settings(
+        mode="company",
+        company_apps_root=str(company_root),
+        download_dir=str(package.parent),
+        patch_password=PASSWORD,
+    )
+
+    # 適用
+    result = apply_archive(settings, str(package))
+    assert result["failed"] == 0
+    state = load_state(company, "sample-app")
+    assert state["pending_sequences"] == [1]
+
+    # 個別コミット実行
+    commit_res = commit_pending(settings, repo_id="sample-app")
+    assert len(commit_res["results"]) == 1
+    assert commit_res["results"][0]["status"] == "committed"
+    assert commit_res["results"][0]["repo_id"] == "sample-app"
+
+    # コミット後状態確認
+    state_after = load_state(company, "sample-app")
+    assert state_after["confirmed_sequence"] == 1
+    assert state_after["pending_sequences"] == []
+    assert git(company, "status", "--porcelain").decode() == ""
+
+
+def test_list_company_repositories(tmp_path: Path, git_helpers) -> None:
+    """会社側のリポジトリ一覧・状態を取得するテスト"""
+    git, init_repo = git_helpers
+    company_root = tmp_path / "company-apps"
+    app1 = init_repo(company_root / "app-one")
+    (app1 / "file.txt").write_text("app1\n", encoding="utf-8")
+    git(app1, "add", "-A")
+    git(app1, "commit", "-m", "app1 init")
+
+    obsidian = init_repo(tmp_path / "company-obsidian")
+    (obsidian / "note.md").write_text("obsidian\n", encoding="utf-8")
+    git(obsidian, "add", "-A")
+    git(obsidian, "commit", "-m", "obsidian init")
+
+    settings = Settings(
+        mode="company",
+        company_apps_root=str(company_root),
+        company_obsidian_repo=str(obsidian),
+        patch_password=PASSWORD,
+    )
+
+    repos = list_company_repositories(settings)
+    repo_ids = [r["repo_id"] for r in repos]
+    assert "app-one" in repo_ids
+    assert "obsidian-settings" in repo_ids
+    for r in repos:
+        assert "clean" in r
+        assert "pending_sequences" in r
+        assert "head" in r
+
 
 
