@@ -3,9 +3,10 @@
 
 仕様:
 - list_download_packages: ダウンロードフォルダからパッチZIP一覧を取得
+- list_company_repositories: 会社側で登録・検出されたリポジトリ一覧および未コミット・保留状態を取得
 - inspect_archive: ZIP内の署名・SHA-256・メタデータおよび会社側リポジトリ対応状況を検証
 - apply_archive: 各アプリへパッチを未コミット状態で適用（変更・新規ファイル直接上書き配置・削除ファイル消去・安全なバックアップ保持）
-- commit_pending: 動作確認済みの保留中パッチをGitコミット
+- commit_pending: 動作確認済みの保留中パッチ（一括または個別）をGitコミット
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from typing import Any
 from .config import Settings
 from .errors import PackageValidationError, RepPatchError
 from .git import ensure_repository, repository_status, run_git, tracked_files
+from .home import repo_id_for
 from .packages import ArchivePackage, PatchArchive, read_json, write_json
 from .security import safe_repo_path
 
@@ -69,20 +71,36 @@ def inspect_archive(settings: Settings, zip_path: str) -> dict[str, Any]:
         return summary
 
 
-def resolve_company_repo(settings: Settings, manifest: dict[str, Any]) -> Path:
-    repo_id = str(manifest["repo_id"])
+def resolve_company_repo_by_id(settings: Settings, repo_id: str, display_name: str = "") -> tuple[str, Path]:
     explicit = settings.company_repo_paths.get(repo_id)
     if explicit:
         path = Path(explicit).expanduser()
-    elif manifest.get("kind") == "obsidian":
+        ensure_repository(path)
+        return path.name, path
+    if repo_id == "obsidian-settings":
         if not settings.company_obsidian_repo:
             raise RepPatchError("会社側のObsidian設定リポジトリが未設定です")
         path = Path(settings.company_obsidian_repo).expanduser()
-    else:
-        if not settings.company_apps_root:
-            raise RepPatchError("会社側のアプリルートが未設定です")
-        path = Path(settings.company_apps_root).expanduser() / str(manifest["display_name"])
-    ensure_repository(path)
+        ensure_repository(path)
+        return path.name, path
+    if settings.company_apps_root:
+        root = Path(settings.company_apps_root).expanduser()
+        if root.is_dir():
+            if display_name:
+                candidate = root / display_name
+                if candidate.is_dir() and (candidate / ".git").exists():
+                    return candidate.name, candidate
+            for child in root.iterdir():
+                if child.is_dir() and (child / ".git").exists():
+                    if child.name.lower() == repo_id.lower() or repo_id_for(child.name) == repo_id:
+                        return child.name, child
+    raise RepPatchError(f"会社側リポジトリが見つかりません: {repo_id}")
+
+
+def resolve_company_repo(settings: Settings, manifest: dict[str, Any]) -> Path:
+    repo_id = str(manifest["repo_id"])
+    display_name = str(manifest.get("display_name", ""))
+    _, path = resolve_company_repo_by_id(settings, repo_id, display_name)
     return path
 
 
@@ -195,22 +213,31 @@ def _ensure_clean(repo: Path) -> None:
 
 def _commit_pending(repo: Path, state: dict[str, Any], display_name: str) -> dict[str, Any]:
     pending = state.get("pending_sequences", [])
-    if not pending:
+    status = repository_status(repo)
+    if not pending and status["clean"]:
         return state
     run_git(repo, ["add", "-A"])
-    try:
-        _validate_index(repo, state["pending_target_files"])
-    except Exception:
-        run_git(repo, ["reset", "--mixed", "HEAD"], check=False)
-        raise
-    first, last = pending[0], pending[-1]
-    suffix = f"{first:06d}" if first == last else f"{first:06d}-{last:06d}"
-    run_git(repo, ["commit", "-m", f"[myao-patch] {display_name} patch-{suffix}"])
+    if pending:
+        if state.get("pending_target_files"):
+            try:
+                _validate_index(repo, state["pending_target_files"])
+            except Exception:
+                run_git(repo, ["reset", "--mixed", "HEAD"], check=False)
+                raise
+        first, last = pending[0], pending[-1]
+        suffix = f"{first:06d}" if first == last else f"{first:06d}-{last:06d}"
+        msg = f"[myao-patch] {display_name} patch-{suffix}"
+        confirmed_seq = last
+    else:
+        msg = f"[myao-patch] {display_name} update"
+        confirmed_seq = state.get("confirmed_sequence", 0)
+
+    run_git(repo, ["commit", "-m", msg])
     _ensure_clean(repo)
     _remove_backup(state.get("backup_dir", ""))
     state.update(
         {
-            "confirmed_sequence": last,
+            "confirmed_sequence": confirmed_seq,
             "pending_sequences": [],
             "pending_target_files": [],
             "pending_changed_paths": [],
@@ -361,28 +388,79 @@ def apply_archive(
     return {"results": results, "failed": failed, "succeeded": len(results) - failed}
 
 
+def list_company_repositories(settings: Settings) -> list[dict[str, Any]]:
+    candidates: dict[str, tuple[str, Path, str]] = {}
+    if settings.company_apps_root:
+        root = Path(settings.company_apps_root).expanduser()
+        if root.is_dir():
+            for child in sorted(root.iterdir()):
+                if child.is_dir() and (child / ".git").exists():
+                    r_id = repo_id_for(child.name)
+                    candidates[r_id] = (child.name, child, "app")
+    if settings.company_obsidian_repo:
+        obsidian = Path(settings.company_obsidian_repo).expanduser()
+        if obsidian.is_dir() and (obsidian / ".git").exists():
+            candidates["obsidian-settings"] = (obsidian.name, obsidian, "obsidian")
+    for r_id, p_str in settings.company_repo_paths.items():
+        p = Path(p_str).expanduser()
+        if p.is_dir() and (p / ".git").exists():
+            kind = "obsidian" if "obsidian" in p.name.lower() else "app"
+            candidates[r_id] = (p.name, p, kind)
+
+    results: list[dict[str, Any]] = []
+    for repo_id, (display_name, path, kind) in sorted(candidates.items(), key=lambda item: item[1][0].lower()):
+        try:
+            status = repository_status(path)
+            state = load_state(path, repo_id)
+            results.append({
+                "repo_id": repo_id,
+                "display_name": display_name,
+                "path": str(path),
+                "kind": kind,
+                "clean": bool(status["clean"]),
+                "changes": int(status["changes"]),
+                "head": str(status["head"]),
+                "branch": str(status["branch"]),
+                "confirmed_sequence": int(state.get("confirmed_sequence", 0)),
+                "pending_sequences": list(state.get("pending_sequences", [])),
+                "error": "",
+            })
+        except Exception as exc:  # noqa: BLE001
+            results.append({
+                "repo_id": repo_id,
+                "display_name": display_name,
+                "path": str(path),
+                "kind": kind,
+                "clean": False,
+                "changes": 0,
+                "head": "",
+                "branch": "",
+                "confirmed_sequence": 0,
+                "pending_sequences": [],
+                "error": str(exc),
+            })
+    return results
+
+
 def commit_pending(settings: Settings, repo_id: str | None = None) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     candidates: list[tuple[str, str, Path]] = []
     if repo_id:
-        explicit = settings.company_repo_paths.get(repo_id)
-        if not explicit:
-            raise RepPatchError("個別リポジトリのパスが設定されていません")
-        candidates.append((repo_id, Path(explicit).name, Path(explicit)))
+        display_name, path = resolve_company_repo_by_id(settings, repo_id)
+        candidates.append((repo_id, display_name, path))
     else:
-        for child in Path(settings.company_apps_root).expanduser().iterdir():
-            if child.is_dir() and (child / ".git").exists():
-                candidates.append((child.name.lower(), child.name, child))
-        if settings.company_obsidian_repo:
-            obsidian = Path(settings.company_obsidian_repo).expanduser()
-            candidates.append(("obsidian-settings", obsidian.name, obsidian))
+        repo_list = list_company_repositories(settings)
+        for item in repo_list:
+            if not item.get("error"):
+                candidates.append((item["repo_id"], item["display_name"], Path(item["path"])))
+
     for candidate_id, display_name, repo in candidates:
         try:
-            state_path = _state_path(repo)
-            if not state_path.exists():
-                continue
-            state = read_json(state_path)
-            if not state.get("pending_sequences"):
+            state = load_state(repo, candidate_id)
+            status = repository_status(repo)
+            if not state.get("pending_sequences") and status["clean"]:
+                if repo_id:
+                    results.append(_result(candidate_id, display_name, "unchanged", "コミットする変更はありません"))
                 continue
             _commit_pending(repo, state, display_name)
             results.append(_result(candidate_id, display_name, "committed", "確認済みパッチをコミットしました"))

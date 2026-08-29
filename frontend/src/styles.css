@@ -132,3 +132,14 @@ main { width: min(1420px, 90vw); margin: 0 auto; padding: 44px 0 90px; }
   .topbar { padding:0 3vw; }.hero-stat,.shield { display:none; }.hero h1 { font-size:34px; }.toolbar .button-row { flex-wrap:wrap; }.repo-grid { grid-template-columns:minmax(0,1fr); }.repo-metrics { grid-template-columns:1fr 1fr 1fr; }.workspace-grid { display:block; }.panel { margin-bottom:14px; }.action-panel .button-row { width:100%; }.action-panel .button { width:100%; }.field-row { grid-template-columns:1fr; }.result { grid-template-columns:auto 1fr; }.result .button { grid-column:1/-1; }
   .selection-bar { flex-direction: column; align-items: flex-start; gap: 8px; }
 }
+
+.badge { font-size: 11px; padding: 4px 8px; border-radius: 99px; font-family: "Cascadia Mono", "Consolas", ui-monospace, monospace; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+.badge.warning { background: #faedc7; color: #856404; }
+.badge.success { background: #dcebe6; color: var(--green); }
+.badge.info { background: #e3fafc; color: #0c8599; }
+.button.small { padding: 7px 11px; font-size: 11px; }
+.company-repos-section { margin-top: 36px; }
+.company-repos-section .section-heading { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 18px; gap: 16px; }
+.company-repos-section h2 { margin: 0; font-size: 22px; letter-spacing: -.04em; }
+.company-repos-section p { margin: 4px 0 0; color: #6b746f; font-size: 13px; }
+

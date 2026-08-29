@@ -6,7 +6,7 @@ Myao Patch Bridge のローカル REST API サーバー
 - 設定管理（GET/PUT /api/settings）
 - リポジトリ管理（GET /api/repositories, POST /api/repositories, PUT /api/repositories/{repo_id}, DELETE /api/repositories/{repo_id}, POST /api/repositories/discover）
 - 自宅パッチ公開（POST /api/home/publish）
-- 会社パッチ適用・検証・コミット（GET /api/company/downloads, POST /api/company/inspect, POST /api/company/apply-all, POST /api/company/retry, POST /api/company/commit-pending）
+- 会社パッチ適用・検証・コミット・一覧（GET /api/company/repositories, GET /api/company/downloads, POST /api/company/inspect, POST /api/company/apply-all, POST /api/company/retry, POST /api/company/commit-pending）
 - 診断機能（GET /api/diagnostics）
 - フロントエンドSPA配信
 """
@@ -25,6 +25,7 @@ from .company import (
     apply_archive,
     commit_pending,
     inspect_archive,
+    list_company_repositories,
     list_download_packages,
 )
 from .config import PROJECT_ROOT, SettingsStore
@@ -149,6 +150,10 @@ def create_app(store: SettingsStore | None = None) -> FastAPI:
     def publish_patches() -> dict[str, Any]:
         settings = settings_store.load()
         return publish(settings, settings_store)
+
+    @app.get("/api/company/repositories")
+    def company_repositories() -> dict[str, Any]:
+        return {"repositories": list_company_repositories(settings_store.load())}
 
     @app.get("/api/company/downloads")
     def downloads() -> dict[str, Any]:

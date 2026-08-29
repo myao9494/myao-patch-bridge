@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import { api, jsonBody } from "./api";
 import type {
+  CompanyRepository,
   DownloadPackage,
   OperationResult,
   PackageSummary,
@@ -97,6 +98,7 @@ export default function App() {
   const [selectedZip, setSelectedZip] = useState("");
   const [summary, setSummary] = useState<PackageSummary | null>(null);
   const [results, setResults] = useState<OperationResult[]>([]);
+  const [companyRepos, setCompanyRepos] = useState<CompanyRepository[]>([]);
   const [diagnostics, setDiagnostics] = useState<any>(null);
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
 
@@ -131,13 +133,21 @@ export default function App() {
     if (value.packages.length) setSelectedZip((current) => current || value.packages[0].path);
   }, []);
 
+  const loadCompanyRepositories = useCallback(async () => {
+    const value = await api<{ repositories: CompanyRepository[] }>("/api/company/repositories");
+    setCompanyRepos(value.repositories);
+  }, []);
+
   useEffect(() => {
     perform("初期化中", async () => {
       const value = await loadSettings();
       if (value.mode === "home") await loadRepositories().catch(() => undefined);
-      else await loadDownloads();
+      else {
+        await loadDownloads().catch(() => undefined);
+        await loadCompanyRepositories().catch(() => undefined);
+      }
     });
-  }, [loadDownloads, loadRepositories, loadSettings, perform]);
+  }, [loadCompanyRepositories, loadDownloads, loadRepositories, loadSettings, perform]);
 
   useEffect(() => {
     const capture = (event: Event) => {
@@ -284,7 +294,10 @@ export default function App() {
         ...jsonBody({ zip_path: selectedZip, correction }),
       })
     );
-    if (value) setResults(value.results);
+    if (value) {
+      setResults(value.results);
+      await loadCompanyRepositories();
+    }
   };
 
   const retry = async (repoId: string) => {
@@ -294,7 +307,10 @@ export default function App() {
         ...jsonBody({ zip_path: selectedZip, repo_id: repoId, correction: false }),
       })
     );
-    if (value) setResults((previous) => previous.filter((item) => item.repo_id !== repoId).concat(value.results));
+    if (value) {
+      setResults((previous) => previous.filter((item) => item.repo_id !== repoId).concat(value.results));
+      await loadCompanyRepositories();
+    }
   };
 
   const commitAll = async () => {
@@ -305,7 +321,23 @@ export default function App() {
         ...jsonBody({ repo_id: null }),
       })
     );
-    if (value) setResults(value.results);
+    if (value) {
+      setResults(value.results);
+      await loadCompanyRepositories();
+    }
+  };
+
+  const commitSingle = async (repoId: string) => {
+    const value = await perform("リポジトリをコミット中", () =>
+      api<{ results: OperationResult[] }>("/api/company/commit-pending", {
+        method: "POST",
+        ...jsonBody({ repo_id: repoId }),
+      })
+    );
+    if (value) {
+      setResults((previous) => previous.filter((item) => item.repo_id !== repoId).concat(value.results));
+      await loadCompanyRepositories();
+    }
   };
 
   const runChecks = async () => {
@@ -358,13 +390,16 @@ export default function App() {
             setSelectedZip={(path) => { setSelectedZip(path); setSummary(null); }}
             summary={summary}
             results={results}
+            companyRepos={companyRepos}
             diagnostics={diagnostics}
             onRefresh={loadDownloads}
+            onRefreshRepos={loadCompanyRepositories}
             onInspect={inspect}
             onApply={() => applyAll(false)}
             onCorrection={() => applyAll(true)}
             onRetry={retry}
             onCommit={commitAll}
+            onCommitSingle={commitSingle}
             onDiagnostics={runChecks}
           />
         )}
@@ -652,13 +687,16 @@ function CompanyDashboard(props: {
   setSelectedZip: (path: string) => void;
   summary: PackageSummary | null;
   results: OperationResult[];
+  companyRepos: CompanyRepository[];
   diagnostics: any;
   onRefresh: () => void;
+  onRefreshRepos: () => void;
   onInspect: () => void;
   onApply: () => void;
   onCorrection: () => void;
   onRetry: (id: string) => void;
   onCommit: () => void;
+  onCommitSingle: (id: string) => void;
   onDiagnostics: () => void;
 }) {
   return <>
@@ -687,9 +725,80 @@ function CompanyDashboard(props: {
       </article>
     </section>
     <section className="action-panel">
-      <div><p className="step">STEP 3</p><h2>全アプリへ適用</h2><p>前回分を検証・コミットしてから、新しい変更を未コミット状態で適用します。</p></div>
-      <div className="button-row wrap"><button className="button ghost" onClick={props.onDiagnostics}><ShieldCheck size={17}/>会社環境診断</button><button className="button ghost" onClick={props.onCommit}><PackageCheck size={17}/>確認済みをコミット</button><button className="button warning" disabled={!props.summary} onClick={props.onCorrection}><RotateCcw size={17}/>修正パッチを重ねる</button><button className="button primary" disabled={!props.summary} onClick={props.onApply}><PackageCheck size={17}/>前回分をコミットして全適用</button></div>
+      <div><p className="step">STEP 3</p><h2>全アプリへ一括適用・コミット</h2><p>前回分を検証・コミットしてから、新しい変更を未コミット状態で適用します。</p></div>
+      <div className="button-row wrap"><button className="button ghost" onClick={props.onDiagnostics}><ShieldCheck size={17}/>会社環境診断</button><button className="button ghost" onClick={props.onCommit}><PackageCheck size={17}/>確認済みをすべてコミット</button><button className="button warning" disabled={!props.summary} onClick={props.onCorrection}><RotateCcw size={17}/>修正パッチを重ねる</button><button className="button primary" disabled={!props.summary} onClick={props.onApply}><PackageCheck size={17}/>前回分をコミットして全適用</button></div>
     </section>
+
+    <section className="company-repos-section">
+      <div className="section-heading">
+        <div>
+          <h2>会社側リポジトリ個別操作</h2>
+          <p>各リポジトリの未コミット・保留中パッチ状態を確認し、個別に適用やコミットを実行できます</p>
+        </div>
+        <button className="button ghost" onClick={props.onRefreshRepos}>
+          <RefreshCw size={17} />状態更新
+        </button>
+      </div>
+      <div className="repo-grid">
+        {props.companyRepos.map((repo) => (
+          <article className="repo-card" key={repo.repo_id}>
+            <div className="repo-heading">
+              <div className={`repo-icon ${repo.kind}`}>
+                <GitBranch size={20} />
+              </div>
+              <div>
+                <h3>{repo.display_name}</h3>
+                <p>{repo.path}</p>
+              </div>
+              <div className="repo-status-badge">
+                {repo.pending_sequences.length > 0 ? (
+                  <span className="badge warning">保留中 (#{repo.pending_sequences.map((s) => String(s).padStart(6, "0")).join(", ")})</span>
+                ) : !repo.clean ? (
+                  <span className="badge warning">未コミット変更 ({repo.changes}件)</span>
+                ) : (
+                  <span className="badge success">同期済み (#{String(repo.confirmed_sequence).padStart(6, "0")})</span>
+                )}
+              </div>
+            </div>
+            {repo.error ? (
+              <div className="inline-error">{repo.error}</div>
+            ) : (
+              <div>
+                <div className="repo-metrics">
+                  <div><span>ブランチ</span><code>{repo.branch || "-"}</code></div>
+                  <div><span>HEAD</span><code>{repo.head ? repo.head.slice(0, 7) : "-"}</code></div>
+                  <div><span>変更数</span><strong>{repo.changes}</strong></div>
+                </div>
+                <div className="button-row wrap" style={{ marginTop: "14px" }}>
+                  <button
+                    className="button ghost small"
+                    disabled={repo.clean && repo.pending_sequences.length === 0}
+                    onClick={() => props.onCommitSingle(repo.repo_id)}
+                  >
+                    <Check size={14} />このアプリをコミット
+                  </button>
+                  <button
+                    className="button primary small"
+                    disabled={!props.selectedZip}
+                    onClick={() => props.onRetry(repo.repo_id)}
+                  >
+                    <PackageCheck size={14} />このアプリに適用
+                  </button>
+                </div>
+              </div>
+            )}
+          </article>
+        ))}
+        {!props.companyRepos.length && (
+          <EmptyState
+            icon={<HardDrive />}
+            title="会社側リポジトリが見つかりません"
+            text="設定メニューで「会社側アプリルート」または「会社側Obsidian設定」のパスを設定してください"
+          />
+        )}
+      </div>
+    </section>
+
     {props.results.length > 0 && <section className="results"><h2>処理結果</h2>{props.results.map((item) => <div className={`result ${item.status}`} key={item.repo_id}><span className="result-icon">{item.status === "failed" ? <X/> : item.status === "unchanged" ? <CircleDot/> : <Check/>}</span><div><strong>{item.display_name}</strong><p>{item.message}</p></div>{item.status === "failed" && <button className="button ghost" onClick={() => props.onRetry(item.repo_id)}>このアプリだけ再実行</button>}</div>)}</section>}
     {props.diagnostics && <section className="results"><h2>会社環境診断</h2>{props.diagnostics.checks.map((item: any) => <div className={`result ${item.status === "ok" ? "applied" : "failed"}`} key={item.name}><span className="result-icon">{item.status === "ok" ? <Check/> : <X/>}</span><div><strong>{item.name}</strong><p>{item.detail}</p></div></div>)}</section>}
   </>;

@@ -44,7 +44,8 @@
   - 会社側リポジトリへ未コミット状態でパッチ適用（ロールバック用バックアップ作成）
   - **ファイル直接上書き配置・削除**: `git apply`（差分パッチ）を使用せず、同梱された差分ファイル実体（`added_files/` 内の変更・新規ファイル）を直接上書き配置し、削除対象ファイルを確実に消去
   - **Gitインデックス反映**: `git add -A` でステージング後にファイル整合性を検証し、`git reset --mixed HEAD` で未コミット変更として保持
-  - 動作確認後に「確認済みをコミット」（`commit-pending`）
+  - **リポジトリ個別操作**: 全リポジトリ一括適用・コミットに加え、リポジトリカード単位での「個別コミット」「個別適用（再試行）」が可能
+  - 動作確認後に「確認済みをすべてコミット」または各カードの「このアプリをコミット」
   - テスト不合格時は「修正パッチを重ねる」（`correction`）
 - **環境診断**:
   - Python、Git、ポート、ディレクトリ権限、Git同期互換性等を自動診断
@@ -70,17 +71,18 @@
 | `GET` | `/api/session` | セッショントークン発行 |
 | `GET` | `/api/settings` | 設定取得 |
 | `PUT` | `/api/settings` | 設定更新 |
-| `GET` | `/api/repositories` | 登録リポジトリ一覧・状態取得 |
+| `GET` | `/api/repositories` | 登録リポジトリ一覧・状態取得（自宅側） |
 | `POST` | `/api/repositories` | リポジトリ手動追加 |
 | `PUT` | `/api/repositories/{repo_id}` | リポジトリ設定更新 |
 | `DELETE` | `/api/repositories/{repo_id}` | リポジトリ登録削除 |
 | `POST` | `/api/repositories/discover` | アプリルートからのリポジトリ自動再検出 |
 | `POST` | `/api/home/publish` | 自宅側パッチ作成・署名・公開 |
+| `GET` | `/api/company/repositories` | 会社側リポジトリ一覧・状態取得（個別操作用） |
 | `GET` | `/api/company/downloads` | 会社側パッチZIP一覧取得 |
 | `POST` | `/api/company/inspect` | パッチZIPの署名・内容検証 |
 | `POST` | `/api/company/apply-all` | 全リポジトリへのパッチ適用 |
-| `POST` | `/api/company/retry` | 単一リポジトリへのパッチ再適用 |
-| `POST` | `/api/company/commit-pending` | 保留中パッチのGitコミット |
+| `POST` | `/api/company/retry` | 単一リポジトリへのパッチ再適用（個別適用） |
+| `POST` | `/api/company/commit-pending` | 保留中パッチのGitコミット（一括または個別） |
 | `GET` | `/api/diagnostics` | 環境診断実行 |
 
 ---

@@ -83,3 +83,18 @@ export interface OperationResult {
   message: string;
   pending_sequences?: number[];
 }
+
+export interface CompanyRepository {
+  repo_id: string;
+  display_name: string;
+  path: string;
+  kind: "app" | "obsidian";
+  clean: boolean;
+  changes: number;
+  head: string;
+  branch: string;
+  confirmed_sequence: number;
+  pending_sequences: number[];
+  error?: string;
+}
+
