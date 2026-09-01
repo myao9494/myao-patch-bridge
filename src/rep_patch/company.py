@@ -5,7 +5,7 @@
 - list_download_packages: ダウンロードフォルダからパッチZIP一覧を取得
 - list_company_repositories: 会社側で登録・検出されたリポジトリ一覧および未コミット・保留状態を取得
 - inspect_archive: ZIP内の署名・SHA-256・メタデータおよび会社側リポジトリ対応状況を検証
-- apply_archive: 各アプリへパッチを未コミット状態で適用（変更・新規ファイル直接上書き配置・削除ファイル消去・安全なバックアップ保持）
+- apply_archive: 各アプリへパッチを適用（変更・新規ファイル直接上書き配置・削除ファイル消去・事前自動コミット・即時コミット確定・安全なバックアップ保持）
 - commit_pending: 動作確認済みの保留中パッチ（一括または個別）をGitコミット
 - init_repository_sequence: 単一リポジトリの次回適用開始番号を指定し、state.jsonを即時作成・初期化
 - init_all_repositories_sequence: 会社側全リポジトリの次回適用開始番号を一括初期化
@@ -19,7 +19,7 @@ from typing import Any
 
 from .config import Settings
 from .errors import PackageValidationError, RepPatchError
-from .git import ensure_repository, repository_status, run_git, tracked_files
+from .git import ensure_repository, repository_status, run_git
 from .home import repo_id_for
 from .packages import ArchivePackage, PatchArchive, read_json, write_json
 from .security import safe_repo_path
@@ -142,25 +142,6 @@ def save_state(repo: Path, state: dict[str, Any]) -> None:
     write_json(_state_path(repo), state)
 
 
-def _file_identity(items: list[dict[str, str]]) -> list[tuple[str, str]]:
-    return sorted((item["path"], item["blob"]) for item in items)
-
-
-def _validate_index(repo: Path, expected: list[dict[str, str]]) -> None:
-    actual = tracked_files(repo)
-    if _file_identity(actual) != _file_identity(expected):
-        expected_map = dict(_file_identity(expected))
-        actual_map = dict(_file_identity(actual))
-        changed = sorted(
-            path
-            for path in set(expected_map) | set(actual_map)
-            if expected_map.get(path) != actual_map.get(path)
-        )
-        preview = "、".join(changed[:8])
-        if len(changed) > 8:
-            preview += f" ほか{len(changed) - 8}件"
-        raise RepPatchError(f"想定外のファイル差分があります: {preview}")
-
 
 def _backup_paths(repo: Path, paths: list[str]) -> Path:
     backup_root = _git_dir(repo) / "rep-patch" / "backups"
@@ -221,12 +202,6 @@ def _commit_pending(repo: Path, state: dict[str, Any], display_name: str) -> dic
         return state
     run_git(repo, ["add", "-A"])
     if pending:
-        if state.get("pending_target_files"):
-            try:
-                _validate_index(repo, state["pending_target_files"])
-            except Exception:
-                # ユーザーからのコミット指示、または適用前クリーン化では変更を確実にコミットする
-                pass
         first, last = pending[0], pending[-1]
         suffix = f"{first:06d}" if first == last else f"{first:06d}-{last:06d}"
         msg = f"[myao-patch] {display_name} patch-{suffix}"
@@ -276,11 +251,6 @@ def _apply_packages(
         if not correction:
             raise RepPatchError("前回パッチが未コミットです")
         run_git(repo, ["add", "-A"])
-        try:
-            _validate_index(repo, state["pending_target_files"])
-        except Exception:
-            run_git(repo, ["reset", "--mixed", "HEAD"], check=False)
-            raise
     else:
         _ensure_clean(repo)
 
@@ -310,9 +280,8 @@ def _apply_packages(
                 del_target = safe_repo_path(repo, del_rel)
                 del_target.unlink(missing_ok=True)
 
-        # ワークツリーの全変更をインデックスへ反映し検証
+        # ワークツリーの全変更をインデックスへ反映
         run_git(repo, ["add", "-A"])
-        _validate_index(repo, packages[-1].manifest["target_files"])
 
         # パッチ適用と同時にGitコミットを実行し、クリーンな最新状態にする
         first_seq = int(packages[0].manifest["sequence"])
