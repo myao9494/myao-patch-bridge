@@ -6,6 +6,7 @@ APIエンドポイントおよびPWA配信セキュリティのテスト
 - test_pwa_is_served_with_local_only_security_headers: PWA静的ファイル配信とローカル専用セキュリティヘッダーの検証
 - test_company_api_repositories_and_commit: 会社側リポジトリ一覧・個別コミットAPIの検証
 - test_company_api_init_sequence: 会社側リポジトリ適用開始番号指定APIおよびstate.json生成の検証
+- test_api_open_vscode: VS Code起動APIの検証（正常系・異常系・VS Code未検出）
 """
 from __future__ import annotations
 
@@ -126,5 +127,60 @@ def test_company_api_init_sequence(tmp_path, git_helpers) -> None:
     results_all = res_all.json()["results"]
     assert len(results_all) == 1
     assert results_all[0]["confirmed_sequence"] == 4
+
+
+def test_api_open_vscode(tmp_path, monkeypatch) -> None:
+    """VS Code起動APIのテスト（正常系・存在しないパス・VS Code未検出）"""
+    store = SettingsStore(tmp_path / "settings.local.json")
+    client = TestClient(create_app(store))
+    token = client.get("/api/session").json()["token"]
+
+    target_dir = tmp_path / "sample-app"
+    target_dir.mkdir()
+
+    # 1. 正常系: code コマンドが見つかり、Popen が呼び出される
+    calls = []
+
+    def fake_which(cmd):
+        return "/usr/local/bin/code" if cmd == "code" else None
+
+    def fake_popen(cmd):
+        calls.append(cmd)
+
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    res = client.post(
+        "/api/open-vscode",
+        json={"path": str(target_dir)},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res.status_code == 200
+    assert res.json()["status"] == "ok"
+    assert len(calls) == 1
+    assert calls[0] == ["/usr/local/bin/code", str(target_dir)]
+
+    # 2. 異常系: 存在しないパス
+    res_missing = client.post(
+        "/api/open-vscode",
+        json={"path": str(tmp_path / "not-exist")},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res_missing.status_code == 400
+    assert "見つかりません" in res_missing.json()["detail"] or "存在しません" in res_missing.json()["detail"]
+
+    # 3. 異常系: VS Code がインストールされていない（which が None を返す）
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    res_no_code = client.post(
+        "/api/open-vscode",
+        json={"path": str(target_dir)},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res_no_code.status_code == 400
+    assert "VS Code" in res_no_code.json()["detail"]
+
 
 
