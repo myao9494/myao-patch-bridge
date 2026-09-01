@@ -781,8 +781,8 @@ function CompanyDashboard(props: {
       </article>
     </section>
     <section className="action-panel">
-      <div><p className="step">STEP 3</p><h2>全アプリへ一括適用・コミット</h2><p>前回分を検証・コミットしてから、新しい変更を未コミット状態で適用します。</p></div>
-      <div className="button-row wrap"><button className="button ghost" onClick={props.onDiagnostics}><ShieldCheck size={17}/>会社環境診断</button><button className="button ghost" onClick={props.onCommit}><PackageCheck size={17}/>確認済みをすべてコミット</button><button className="button warning" disabled={!props.summary} onClick={props.onCorrection}><RotateCcw size={17}/>修正パッチを重ねる</button><button className="button primary" disabled={!props.summary} onClick={props.onApply}><PackageCheck size={17}/>前回分をコミットして全適用</button></div>
+      <div><p className="step">STEP 3</p><h2>全アプリへ一括適用・コミット</h2><p>未コミット変更があれば事前に自動コミットし、パッチを適用して最新コミットまで完了させます（常にクリーン状態を維持）。</p></div>
+      <div className="button-row wrap"><button className="button ghost" onClick={props.onDiagnostics}><ShieldCheck size={17}/>会社環境診断</button><button className="button ghost" onClick={props.onCommit}><PackageCheck size={17}/>手動変更をすべてコミット</button><button className="button primary" disabled={!props.summary} onClick={props.onApply}><PackageCheck size={17}/>全アプリへ適用（即時コミット）</button></div>
     </section>
 
     <section className="company-repos-section">
@@ -812,9 +812,7 @@ function CompanyDashboard(props: {
                 <p>{repo.path}</p>
               </div>
               <div className="repo-status-badge">
-                {repo.pending_sequences.length > 0 ? (
-                  <span className="badge warning">保留中 (#{repo.pending_sequences.map((s) => String(s).padStart(6, "0")).join(", ")})</span>
-                ) : !repo.clean ? (
+                {!repo.clean ? (
                   <span className="badge warning">未コミット変更 ({repo.changes}件)</span>
                 ) : (
                   <span className="badge success">同期済み (#{String(repo.confirmed_sequence).padStart(6, "0")})</span>
@@ -828,16 +826,16 @@ function CompanyDashboard(props: {
                 <div className="repo-metrics">
                   <div><span>ブランチ</span><code>{repo.branch || "-"}</code></div>
                   <div><span>HEAD</span><code>{repo.head ? repo.head.slice(0, 7) : "-"}</code></div>
-                  <div><span>次回適用</span><code>#{String(repo.pending_sequences.length > 0 ? repo.pending_sequences[0] : repo.confirmed_sequence + 1).padStart(6, "0")}〜</code></div>
+                  <div><span>次回適用</span><code>#{String(repo.confirmed_sequence + 1).padStart(6, "0")}〜</code></div>
                   <div><span>変更数</span><strong>{repo.changes}</strong></div>
                 </div>
                 <div className="button-row wrap" style={{ marginTop: "14px" }}>
                   <button
                     className="button ghost small"
-                    disabled={repo.clean && repo.pending_sequences.length === 0}
+                    disabled={repo.clean}
                     onClick={() => props.onCommitSingle(repo.repo_id)}
                   >
-                    <Check size={14} />このアプリをコミット
+                    <Check size={14} />手動変更をコミット
                   </button>
                   <button
                     className="button primary small"

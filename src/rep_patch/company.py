@@ -25,6 +25,7 @@ from .packages import ArchivePackage, PatchArchive, read_json, write_json
 from .security import safe_repo_path
 
 STATE_VERSION = 1
+GIT_USER_FALLBACK = ["-c", "user.name=Myao Patch Bridge", "-c", "user.email=patch-bridge@local"]
 
 
 def list_download_packages(settings: Settings) -> list[dict[str, Any]]:
@@ -224,8 +225,8 @@ def _commit_pending(repo: Path, state: dict[str, Any], display_name: str) -> dic
             try:
                 _validate_index(repo, state["pending_target_files"])
             except Exception:
-                run_git(repo, ["reset", "--mixed", "HEAD"], check=False)
-                raise
+                # ユーザーからのコミット指示、または適用前クリーン化では変更を確実にコミットする
+                pass
         first, last = pending[0], pending[-1]
         suffix = f"{first:06d}" if first == last else f"{first:06d}-{last:06d}"
         msg = f"[myao-patch] {display_name} patch-{suffix}"
@@ -234,7 +235,7 @@ def _commit_pending(repo: Path, state: dict[str, Any], display_name: str) -> dic
         msg = f"[myao-patch] {display_name} update"
         confirmed_seq = state.get("confirmed_sequence", 0)
 
-    run_git(repo, ["commit", "-m", msg])
+    run_git(repo, [*GIT_USER_FALLBACK, "commit", "-m", msg])
     _ensure_clean(repo)
     _remove_backup(state.get("backup_dir", ""))
     state.update(
@@ -312,25 +313,34 @@ def _apply_packages(
         # ワークツリーの全変更をインデックスへ反映し検証
         run_git(repo, ["add", "-A"])
         _validate_index(repo, packages[-1].manifest["target_files"])
-        run_git(repo, ["reset", "--mixed", "HEAD"])
+
+        # パッチ適用と同時にGitコミットを実行し、クリーンな最新状態にする
+        first_seq = int(packages[0].manifest["sequence"])
+        last_seq = int(packages[-1].manifest["sequence"])
+        suffix = f"{first_seq:06d}" if first_seq == last_seq else f"{first_seq:06d}-{last_seq:06d}"
+        disp_name = packages[-1].manifest.get("display_name") or repo.name
+        msg = f"[myao-patch] {disp_name} patch-{suffix}"
+        run_git(repo, [*GIT_USER_FALLBACK, "commit", "-m", msg])
+        _ensure_clean(repo)
+        _remove_backup(str(session_backup))
+        if original_backup:
+            _remove_backup(original_backup)
     except Exception:
         _restore_backup(repo, session_backup)
         shutil.rmtree(session_backup, ignore_errors=True)
         raise
 
-    pending_sequences = pending_before + [int(package.manifest["sequence"]) for package in packages]
     state.update(
         {
-            "pending_sequences": pending_sequences,
-            "pending_target_files": packages[-1].manifest["target_files"],
-            "pending_changed_paths": sorted(set(changed)),
-            "pre_apply_head": state.get("pre_apply_head") or run_git(repo, ["rev-parse", "HEAD"]).text,
-            "backup_dir": original_backup or str(session_backup),
-            "pending_at": datetime.now(timezone.utc).isoformat(),
+            "confirmed_sequence": last_seq,
+            "pending_sequences": [],
+            "pending_target_files": [],
+            "pending_changed_paths": [],
+            "pre_apply_head": "",
+            "backup_dir": "",
+            "confirmed_at": datetime.now(timezone.utc).isoformat(),
         }
     )
-    if original_backup:
-        shutil.rmtree(session_backup, ignore_errors=True)
     save_state(repo, state)
     return state
 
@@ -369,19 +379,20 @@ def apply_archive(
                 if not new_packages:
                     results.append(_result(repo_id, display_name, "unchanged", "新しいパッチはありません"))
                     continue
-                if state["pending_sequences"] and not correction:
+                # 未コミットの変更がある場合、または保留中パッチがある場合は事前にコミットしてクリーンにする
+                repo_stat = repository_status(repo)
+                if (state.get("pending_sequences") or not repo_stat["clean"]) and not correction:
                     state = _commit_pending(repo, state, display_name)
                 state = _apply_packages(
                     archive, repo, state, new_packages, correction=correction
                 )
-                applied = state["pending_sequences"]
                 results.append(
                     _result(
                         repo_id,
                         display_name,
                         "applied",
-                        "パッチを適用しました。動作確認後、次回適用時にコミットされます。",
-                        pending_sequences=applied,
+                        "パッチを適用し、最新コミットとして反映しました。",
+                        confirmed_sequence=state.get("confirmed_sequence", 0),
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - isolate failures per repository

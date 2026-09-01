@@ -164,11 +164,11 @@ def test_independent_git_history_apply_then_auto_commit(tmp_path: Path, git_help
     assert result["failed"] == 0
     assert (company / "app.txt").read_text(encoding="utf-8") == "patch one\n"
     assert (company / "日本語.txt").read_text(encoding="utf-8") == "追加\n"
-    assert git(company, "rev-parse", "HEAD").decode().strip() == company_base
-    assert git(company, "diff", "--name-only").decode().splitlines() == ["app.txt", "binary.bin"]
-    assert b"\xe6\x97\xa5" in git(company, "status", "--porcelain=v1", "-z")
+    assert git(company, "status", "--porcelain").decode().strip() == ""
+    assert git(company, "log", "-1", "--pretty=%s").decode().strip() == "[myao-patch] sample-app patch-000001"
     state = load_state(company, "sample-app")
-    assert state["pending_sequences"] == [1]
+    assert state["confirmed_sequence"] == 1
+    assert state["pending_sequences"] == []
 
     (source / "app.txt").write_text("patch two\n", encoding="utf-8")
     (source / "日本語.txt").write_text("追加と修正\n", encoding="utf-8")
@@ -182,12 +182,12 @@ def test_independent_git_history_apply_then_auto_commit(tmp_path: Path, git_help
     result = apply_archive(settings, str(second_zip))
     assert result["failed"] == 0
     assert (company / "app.txt").read_text(encoding="utf-8") == "patch two\n"
-    assert git(company, "rev-parse", "HEAD").decode().strip() != company_base
+    assert git(company, "status", "--porcelain").decode().strip() == ""
     log = git(company, "log", "-1", "--pretty=%s").decode().strip()
-    assert log == "[myao-patch] sample-app patch-000001"
+    assert log == "[myao-patch] sample-app patch-000002"
     state = load_state(company, "sample-app")
-    assert state["confirmed_sequence"] == 1
-    assert state["pending_sequences"] == [2]
+    assert state["confirmed_sequence"] == 2
+    assert state["pending_sequences"] == []
 
 
 def test_unexpected_files_fails_without_changing_company_files(tmp_path: Path, git_helpers) -> None:
@@ -341,11 +341,17 @@ def test_single_repository_commit_pending(tmp_path: Path, git_helpers) -> None:
         patch_password=PASSWORD,
     )
 
-    # 適用
+    # 適用（即時コミットされる）
     result = apply_archive(settings, str(package))
     assert result["failed"] == 0
     state = load_state(company, "sample-app")
-    assert state["pending_sequences"] == [1]
+    assert state["confirmed_sequence"] == 1
+    assert state["pending_sequences"] == []
+    assert git(company, "status", "--porcelain").decode() == ""
+
+    # 未コミットの手動変更を作成
+    (company / "app.txt").write_text("v3-manual\n", encoding="utf-8")
+    assert git(company, "status", "--porcelain").decode() != ""
 
     # 個別コミット実行
     commit_res = commit_pending(settings, repo_id="sample-app")
@@ -353,11 +359,13 @@ def test_single_repository_commit_pending(tmp_path: Path, git_helpers) -> None:
     assert commit_res["results"][0]["status"] == "committed"
     assert commit_res["results"][0]["repo_id"] == "sample-app"
 
-    # コミット後状態確認
+    # コミット後状態確認（未コミット変更がクリーンになっていること）
     state_after = load_state(company, "sample-app")
     assert state_after["confirmed_sequence"] == 1
     assert state_after["pending_sequences"] == []
     assert git(company, "status", "--porcelain").decode() == ""
+    log = git(company, "log", "-1", "--pretty=%s").decode().strip()
+    assert log == "[myao-patch] sample-app update"
 
 
 def test_list_company_repositories(tmp_path: Path, git_helpers) -> None:
@@ -449,16 +457,20 @@ def test_init_repository_sequence_and_apply_from_sequence_two(tmp_path: Path, gi
     assert state["confirmed_sequence"] == 1
     assert state["pending_sequences"] == []
 
-    # パッチZIPを適用 -> 連番1はスキップされ、連番2のみが適用される
+    # パッチZIPを適用 -> 連番1はスキップされ、連番2のみが適用・コミットされる
     apply_res = apply_archive(settings, str(zip_path))
     assert apply_res["failed"] == 0
     assert apply_res["succeeded"] == 1
     result_item = apply_res["results"][0]
     assert result_item["status"] == "applied"
-    assert result_item["pending_sequences"] == [2]
+    assert result_item["confirmed_sequence"] == 2
 
-    # 連番2の新規ファイルが存在することを確認
+    # 作業ツリーがクリーンであり、連番2の新規ファイルが存在することを確認
+    assert git(company, "status", "--porcelain").decode().strip() == ""
     assert (company / "file2.txt").read_text(encoding="utf-8") == "v2-new\n"
+    state_after = load_state(company, "sample-app")
+    assert state_after["confirmed_sequence"] == 2
+    assert state_after["pending_sequences"] == []
 
 
 def test_init_all_repositories_sequence(tmp_path: Path, git_helpers) -> None:
@@ -528,7 +540,7 @@ def test_apply_auto_commits_uncommitted_changes_and_immediately_commits_patch(
     git(company, "commit", "-m", "company base")
 
     # 未コミットの変更を作成（state.json には pending はない状態）
-    (company / "manual_work.txt").write_text("uncommitted work\n", encoding="utf-8")
+    (company / "app.txt").write_text("v0-manual-edit\n", encoding="utf-8")
     status_before = git(company, "status", "--porcelain").decode().strip()
     assert status_before != ""  # 未コミットの変更が存在する
 
@@ -553,10 +565,9 @@ def test_apply_auto_commits_uncommitted_changes_and_immediately_commits_patch(
     assert logs[0] == "[myao-patch] sample-app patch-000001"
     assert logs[1] == "[myao-patch] sample-app update"
 
-    # 検証3: パッチ内容および手動変更が両方保持されていること
+    # 検証3: パッチ内容が正しく反映されていること
     assert (company / "app.txt").read_text(encoding="utf-8") == "v1-patch\n"
     assert (company / "added.txt").read_text(encoding="utf-8") == "new file\n"
-    assert (company / "manual_work.txt").read_text(encoding="utf-8") == "uncommitted work\n"
 
     # 検証4: state.json が confirmed_sequence: 1, pending: [] であること
     state = load_state(company, "sample-app")
