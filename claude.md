@@ -45,6 +45,7 @@
   - **ファイル直接上書き配置・削除**: `git apply`（差分パッチ）を使用せず、同梱された差分ファイル実体（`added_files/` 内の変更・新規ファイル）を直接上書き配置し、削除対象ファイルを確実に消去
   - **Gitインデックス反映**: `git add -A` でステージング後にファイル整合性を検証し、`git reset --mixed HEAD` で未コミット変更として保持
   - **リポジトリ個別操作**: 全リポジトリ一括適用・コミットに加え、リポジトリカード単位での「個別コミット」「個別適用（再試行）」が可能
+  - **適用開始番号指定とstate.json自動生成**: 過去エラーや連番スキップ（例: 2番から適用したい場合）に対応するため、リポジトリ個別または全アプリ一括で次回適用開始番号を指定可能。指定と同時に各リポジトリの `.git/rep-patch/state.json` を即座に自動生成・初期化
   - 動作確認後に「確認済みをすべてコミット」または各カードの「このアプリをコミット」
   - テスト不合格時は「修正パッチを重ねる」（`correction`）
 - **環境診断**:
@@ -83,9 +84,13 @@
 | `POST` | `/api/company/apply-all` | 全リポジトリへのパッチ適用 |
 | `POST` | `/api/company/retry` | 単一リポジトリへのパッチ再適用（個別適用） |
 | `POST` | `/api/company/commit-pending` | 保留中パッチのGitコミット（一括または個別） |
+| `POST` | `/api/company/repositories/{repo_id}/sequence` | 単一リポジトリの次回適用開始番号指定・state.json生成 |
+| `POST` | `/api/company/repositories/sequence-all` | 全リポジトリ一括の次回適用開始番号指定・state.json生成 |
 | `GET` | `/api/diagnostics` | 環境診断実行 |
 
 ---
 
 ## 6. データ保存場所
 - 設定ファイル: `data/settings.local.json`（Git管理外）
+- 会社側適用状態ファイル: `<各リポジトリ>/.git/rep-patch/state.json`
+

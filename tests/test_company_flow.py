@@ -398,19 +398,21 @@ def test_init_repository_sequence_and_apply_from_sequence_two(tmp_path: Path, gi
     home = init_repo(tmp_path / "home-app")
     (home / "file1.txt").write_text("v0\n", encoding="utf-8")
     git(home, "add", "-A")
-    c0 = git(home, "commit", "-m", "c0")
+    git(home, "commit", "-m", "c0")
+    c0 = git(home, "rev-parse", "HEAD").decode().strip()
 
     (home / "file1.txt").write_text("v1\n", encoding="utf-8")
     git(home, "add", "-A")
-    c1 = git(home, "commit", "-m", "c1")
+    git(home, "commit", "-m", "c1")
+    c1 = git(home, "rev-parse", "HEAD").decode().strip()
 
     (home / "file2.txt").write_text("v2-new\n", encoding="utf-8")
     git(home, "add", "-A")
-    c2 = git(home, "commit", "-m", "c2")
+    git(home, "commit", "-m", "c2")
+    c2 = git(home, "rev-parse", "HEAD").decode().strip()
 
     # パッチZIP作成 (連番1: c0->c1, 連番2: c1->c2)
-    package_repo = make_package_repo(tmp_path, home, git, [(c0, c1), (c1, c2)])
-    zip_path = make_patch_zip(tmp_path / "Downloads", package_repo)
+    zip_path = make_package_repo(tmp_path / "patch_out", home, git, [(c0, c1), (c1, c2)])
 
     # 会社側: c1の状態と同じファイル構成で初期コミット (連番1適用済み相当)
     company_root = tmp_path / "company-apps"
@@ -422,7 +424,7 @@ def test_init_repository_sequence_and_apply_from_sequence_two(tmp_path: Path, gi
     settings = Settings(
         mode="company",
         company_apps_root=str(company_root),
-        download_dir=str(tmp_path / "Downloads"),
+        download_dir=str(zip_path.parent),
         patch_password=PASSWORD,
     )
 

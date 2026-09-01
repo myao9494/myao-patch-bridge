@@ -11,6 +11,7 @@
  * - 会社モード（CompanyDashboard）:
  *   - ダウンロード済みパッチZIPの検索・選択・署名検証
  *   - 会社側リポジトリへの差分適用・復元・コミット
+ *   - 適用開始番号の指定とstate.json自動生成（個別・一括）
  *   - 会社側環境診断
  * - 共通: 設定ドロワー、PWAインストールプロンプト、通知・エラーバナー
  */
@@ -28,6 +29,7 @@ import {
   FolderPlus,
   GitBranch,
   HardDrive,
+  Hash,
   LoaderCircle,
   Menu,
   PackageCheck,
@@ -340,6 +342,56 @@ export default function App() {
     }
   };
 
+  const setRepoSequence = async (repoId: string, displayName: string, currentConfirmed: number) => {
+    const defaultNext = currentConfirmed + 1;
+    const input = prompt(
+      `【${displayName}】\n次回適用開始番号（パッチ連番）を指定してください。\n※ 連番 ${defaultNext} を指定すると、直前の #${String(defaultNext - 1).padStart(6, "0")} まで確定済みとして state.json が生成・保存されます。`,
+      String(defaultNext > 1 ? defaultNext : 2)
+    );
+    if (!input) return;
+    const startSeq = parseInt(input, 10);
+    if (isNaN(startSeq) || startSeq < 1) {
+      alert("1以上の整数を入力してください");
+      return;
+    }
+    const value = await perform("適用開始番号を設定中", () =>
+      api<{ repo_id: string; start_sequence: number; confirmed_sequence: number }>(
+        `/api/company/repositories/${repoId}/sequence`,
+        {
+          method: "POST",
+          ...jsonBody({ start_sequence: startSeq }),
+        }
+      )
+    );
+    if (value) {
+      setNotice(`【${displayName}】次回適用開始番号を #${String(value.start_sequence).padStart(6, "0")} に設定し、state.json を作成しました`);
+      await loadCompanyRepositories();
+    }
+  };
+
+  const setAllRepoSequence = async () => {
+    const input = prompt(
+      "全アプリの次回適用開始番号（パッチ連番）を一括指定してください。\n各リポジトリの state.json が直ちに作成・初期化されます。\n例: 2 を指定すると全リポジトリが連番2から適用可能になります。",
+      "2"
+    );
+    if (!input) return;
+    const startSeq = parseInt(input, 10);
+    if (isNaN(startSeq) || startSeq < 1) {
+      alert("1以上の整数を入力してください");
+      return;
+    }
+    const value = await perform("全アプリの適用開始番号を一括設定中", () =>
+      api<{ results: any[] }>("/api/company/repositories/sequence-all", {
+        method: "POST",
+        ...jsonBody({ start_sequence: startSeq }),
+      })
+    );
+    if (value) {
+      setNotice(`全リポジトリの次回適用開始番号を #${String(startSeq).padStart(6, "0")} に一括設定しました`);
+      await loadCompanyRepositories();
+    }
+  };
+
   const runChecks = async () => {
     const value = await perform("環境診断中", () => api<any>("/api/diagnostics"));
     if (value) setDiagnostics(value);
@@ -400,6 +452,8 @@ export default function App() {
             onRetry={retry}
             onCommit={commitAll}
             onCommitSingle={commitSingle}
+            onSetSequence={setRepoSequence}
+            onSetAllRepoSequence={setAllRepoSequence}
             onDiagnostics={runChecks}
           />
         )}
@@ -697,6 +751,8 @@ function CompanyDashboard(props: {
   onRetry: (id: string) => void;
   onCommit: () => void;
   onCommitSingle: (id: string) => void;
+  onSetSequence: (repoId: string, displayName: string, currentConfirmed: number) => void;
+  onSetAllRepoSequence: () => void;
   onDiagnostics: () => void;
 }) {
   return <>
@@ -735,9 +791,14 @@ function CompanyDashboard(props: {
           <h2>会社側リポジトリ個別操作</h2>
           <p>各リポジトリの未コミット・保留中パッチ状態を確認し、個別に適用やコミットを実行できます</p>
         </div>
-        <button className="button ghost" onClick={props.onRefreshRepos}>
-          <RefreshCw size={17} />状態更新
-        </button>
+        <div className="button-row">
+          <button className="button ghost" onClick={props.onSetAllRepoSequence} title="全アプリの適用開始番号を一括指定してstate.jsonを生成">
+            <Hash size={17} />全アプリの開始番号設定
+          </button>
+          <button className="button ghost" onClick={props.onRefreshRepos}>
+            <RefreshCw size={17} />状態更新
+          </button>
+        </div>
       </div>
       <div className="repo-grid">
         {props.companyRepos.map((repo) => (
@@ -767,6 +828,7 @@ function CompanyDashboard(props: {
                 <div className="repo-metrics">
                   <div><span>ブランチ</span><code>{repo.branch || "-"}</code></div>
                   <div><span>HEAD</span><code>{repo.head ? repo.head.slice(0, 7) : "-"}</code></div>
+                  <div><span>次回適用</span><code>#{String(repo.pending_sequences.length > 0 ? repo.pending_sequences[0] : repo.confirmed_sequence + 1).padStart(6, "0")}〜</code></div>
                   <div><span>変更数</span><strong>{repo.changes}</strong></div>
                 </div>
                 <div className="button-row wrap" style={{ marginTop: "14px" }}>
@@ -783,6 +845,13 @@ function CompanyDashboard(props: {
                     onClick={() => props.onRetry(repo.repo_id)}
                   >
                     <PackageCheck size={14} />このアプリに適用
+                  </button>
+                  <button
+                    className="button ghost small"
+                    title="適用開始番号を指定してstate.jsonを生成"
+                    onClick={() => props.onSetSequence(repo.repo_id, repo.display_name, repo.confirmed_sequence)}
+                  >
+                    <Hash size={14} />開始番号設定
                   </button>
                 </div>
               </div>

@@ -7,6 +7,8 @@
 - inspect_archive: ZIP内の署名・SHA-256・メタデータおよび会社側リポジトリ対応状況を検証
 - apply_archive: 各アプリへパッチを未コミット状態で適用（変更・新規ファイル直接上書き配置・削除ファイル消去・安全なバックアップ保持）
 - commit_pending: 動作確認済みの保留中パッチ（一括または個別）をGitコミット
+- init_repository_sequence: 単一リポジトリの次回適用開始番号を指定し、state.jsonを即時作成・初期化
+- init_all_repositories_sequence: 会社側全リポジトリの次回適用開始番号を一括初期化
 """
 from __future__ import annotations
 
@@ -485,5 +487,74 @@ def company_status(settings: Settings, archive: PatchArchive | None = None) -> l
         except Exception as exc:  # noqa: BLE001 - return status for every repository
             result.append({**manifest, "state": {}, "company_path": "", "error": str(exc)})
     return result
+
+
+def init_repository_sequence(
+    settings: Settings,
+    repo_id: str,
+    start_sequence: int,
+) -> dict[str, Any]:
+    """
+    指定リポジトリの次回適用開始連番を設定し、state.jsonを即時作成・初期化する
+
+    start_sequence: 次に適用したいパッチ連番（1以上）。
+    内部的には直前まで確定した扱いとして confirmed_sequence = start_sequence - 1 を記録する。
+    """
+    if start_sequence < 1:
+        raise RepPatchError("適用開始番号は1以上の整数を指定してください")
+
+    display_name, repo = resolve_company_repo_by_id(settings, repo_id)
+    confirmed_seq = start_sequence - 1
+
+    # 既存のstate.jsonがあれば読み込み、なければ初期構造を作成
+    try:
+        state = load_state(repo, repo_id)
+    except RepPatchError:
+        state = {
+            "version": STATE_VERSION,
+            "repo_id": repo_id,
+        }
+
+    state.update(
+        {
+            "version": STATE_VERSION,
+            "repo_id": repo_id,
+            "confirmed_sequence": confirmed_seq,
+            "pending_sequences": [],
+            "pending_target_files": [],
+            "pending_changed_paths": [],
+            "pre_apply_head": "",
+            "backup_dir": "",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    save_state(repo, state)
+
+    return {
+        "repo_id": repo_id,
+        "display_name": display_name,
+        "start_sequence": start_sequence,
+        "confirmed_sequence": confirmed_seq,
+    }
+
+
+def init_all_repositories_sequence(
+    settings: Settings,
+    start_sequence: int,
+) -> list[dict[str, Any]]:
+    """
+    会社側の全検出リポジトリに対して一括で次回適用開始連番を設定し、state.jsonを作成する
+    """
+    if start_sequence < 1:
+        raise RepPatchError("適用開始番号は1以上の整数を指定してください")
+
+    repo_list = list_company_repositories(settings)
+    results: list[dict[str, Any]] = []
+    for item in repo_list:
+        if not item.get("error"):
+            res = init_repository_sequence(settings, item["repo_id"], start_sequence)
+            results.append(res)
+    return results
+
 
 

@@ -7,6 +7,7 @@
  * - RepositoryCreatePayload: リポジトリ手動追加リクエスト
  * - Settings: アプリケーション全体設定
  * - PackageSummary / DownloadPackage / OperationResult: パッチ送受信・適用関連型定義
+ * - CompanyRepository / SequenceInitResult: 会社側リポジトリ個別状態および連番初期化型定義
  */
 
 export type Mode = "home" | "company";
@@ -97,4 +98,12 @@ export interface CompanyRepository {
   pending_sequences: number[];
   error?: string;
 }
+
+export interface SequenceInitResult {
+  repo_id: string;
+  display_name: string;
+  start_sequence: number;
+  confirmed_sequence: number;
+}
+
 

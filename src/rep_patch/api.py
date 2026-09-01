@@ -6,7 +6,7 @@ Myao Patch Bridge のローカル REST API サーバー
 - 設定管理（GET/PUT /api/settings）
 - リポジトリ管理（GET /api/repositories, POST /api/repositories, PUT /api/repositories/{repo_id}, DELETE /api/repositories/{repo_id}, POST /api/repositories/discover）
 - 自宅パッチ公開（POST /api/home/publish）
-- 会社パッチ適用・検証・コミット・一覧（GET /api/company/repositories, GET /api/company/downloads, POST /api/company/inspect, POST /api/company/apply-all, POST /api/company/retry, POST /api/company/commit-pending）
+- 会社パッチ適用・検証・コミット・一覧・適用開始番号初期化（GET /api/company/repositories, GET /api/company/downloads, POST /api/company/inspect, POST /api/company/apply-all, POST /api/company/retry, POST /api/company/commit-pending, POST /api/company/repositories/{repo_id}/sequence, POST /api/company/repositories/sequence-all）
 - 診断機能（GET /api/diagnostics）
 - フロントエンドSPA配信
 """
@@ -24,6 +24,8 @@ from . import __version__
 from .company import (
     apply_archive,
     commit_pending,
+    init_all_repositories_sequence,
+    init_repository_sequence,
     inspect_archive,
     list_company_repositories,
     list_download_packages,
@@ -69,6 +71,10 @@ class RetryRequest(ZipRequest):
 
 class CommitRequest(BaseModel):
     repo_id: str | None = None
+
+
+class SequenceInitRequest(BaseModel):
+    start_sequence: int
 
 
 def create_app(store: SettingsStore | None = None) -> FastAPI:
@@ -181,6 +187,20 @@ def create_app(store: SettingsStore | None = None) -> FastAPI:
     @app.post("/api/company/commit-pending")
     def commit(payload: CommitRequest) -> dict[str, Any]:
         return commit_pending(settings_store.load(), payload.repo_id)
+
+    @app.post("/api/company/repositories/{repo_id}/sequence")
+    def set_repo_sequence(repo_id: str, payload: SequenceInitRequest) -> dict[str, Any]:
+        return init_repository_sequence(
+            settings_store.load(), repo_id, payload.start_sequence
+        )
+
+    @app.post("/api/company/repositories/sequence-all")
+    def set_repo_sequence_all(payload: SequenceInitRequest) -> dict[str, Any]:
+        return {
+            "results": init_all_repositories_sequence(
+                settings_store.load(), payload.start_sequence
+            )
+        }
 
     @app.get("/api/diagnostics")
     def diagnostics() -> dict[str, Any]:
