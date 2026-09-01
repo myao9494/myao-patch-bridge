@@ -7,12 +7,16 @@ Myao Patch Bridge のローカル REST API サーバー
 - リポジトリ管理（GET /api/repositories, POST /api/repositories, PUT /api/repositories/{repo_id}, DELETE /api/repositories/{repo_id}, POST /api/repositories/discover）
 - 自宅パッチ公開（POST /api/home/publish）
 - 会社パッチ適用・検証・コミット・一覧・適用開始番号初期化（GET /api/company/repositories, GET /api/company/downloads, POST /api/company/inspect, POST /api/company/apply-all, POST /api/company/retry, POST /api/company/commit-pending, POST /api/company/repositories/{repo_id}/sequence, POST /api/company/repositories/sequence-all）
+- VS Code起動（POST /api/open-vscode）
 - 診断機能（GET /api/diagnostics）
 - フロントエンドSPA配信
 """
 from __future__ import annotations
 
 import secrets
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -75,6 +79,10 @@ class CommitRequest(BaseModel):
 
 class SequenceInitRequest(BaseModel):
     start_sequence: int
+
+
+class OpenVsCodeRequest(BaseModel):
+    path: str
 
 
 def create_app(store: SettingsStore | None = None) -> FastAPI:
@@ -201,6 +209,19 @@ def create_app(store: SettingsStore | None = None) -> FastAPI:
                 settings_store.load(), payload.start_sequence
             )
         }
+
+    @app.post("/api/open-vscode")
+    def open_vscode(payload: OpenVsCodeRequest) -> dict[str, Any]:
+        target = Path(payload.path).expanduser().resolve()
+        if not target.is_dir():
+            raise RepPatchError(f"指定されたディレクトリが存在しません: {target}")
+        code_cmd = shutil.which("code") or shutil.which("code.cmd")
+        if not code_cmd:
+            raise RepPatchError(
+                "VS Code (codeコマンド) が見つかりません。PATHにVS Codeが登録されているか確認してください。"
+            )
+        subprocess.Popen([code_cmd, str(target)])
+        return {"status": "ok", "path": str(target)}
 
     @app.get("/api/diagnostics")
     def diagnostics() -> dict[str, Any]:

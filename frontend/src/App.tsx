@@ -13,7 +13,7 @@
  *   - 会社側リポジトリへの差分適用・復元・コミット
  *   - 適用開始番号の指定とstate.json自動生成（個別・一括）
  *   - 会社側環境診断
- * - 共通: 設定ドロワー、PWAインストールプロンプト、通知・エラーバナー
+ * - 共通: 設定ドロワー、PWAインストールプロンプト、通知・エラーバナー、VS Code起動
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -24,6 +24,7 @@ import {
   ChevronRight,
   CircleDot,
   CloudUpload,
+  Code,
   Download,
   FileArchive,
   FolderPlus,
@@ -403,6 +404,18 @@ export default function App() {
     );
   };
 
+  const openVsCode = async (path: string) => {
+    const value = await perform("VS Codeを起動中", () =>
+      api<{ status: string; path: string }>("/api/open-vscode", {
+        method: "POST",
+        ...jsonBody({ path }),
+      })
+    );
+    if (value) {
+      setNotice("VS Codeで開きました");
+    }
+  };
+
   const unpublished = useMemo(
     () => repositories.reduce((sum, item) => sum + (item.enabled ? item.unpublished_commits ?? 0 : 0), 0),
     [repositories]
@@ -434,6 +447,7 @@ export default function App() {
             onDeleteRepo={deleteRepository}
             onOpenAddModal={() => setAddModalOpen(true)}
             onToggleAll={toggleAllRepositories}
+            onOpenVsCode={openVsCode}
           />
         ) : (
           <CompanyDashboard
@@ -455,6 +469,7 @@ export default function App() {
             onSetSequence={setRepoSequence}
             onSetAllRepoSequence={setAllRepoSequence}
             onDiagnostics={runChecks}
+            onOpenVsCode={openVsCode}
           />
         )}
       </main>
@@ -483,6 +498,7 @@ function HomeDashboard(props: {
   onDeleteRepo: (repo: Repository) => void;
   onOpenAddModal: () => void;
   onToggleAll: (enable: boolean) => void;
+  onOpenVsCode: (path: string) => void;
 }) {
   const allEnabled = props.repositories.length > 0 && props.repositories.every((r) => r.enabled);
   const someEnabled = props.repositories.some((r) => r.enabled);
@@ -602,9 +618,18 @@ function HomeDashboard(props: {
                   onChange={(e) => props.onUpdateRepo(repo.repo_id, { baseline_commit: e.target.value })}
                 />
               </label>
-              <button className="text-button" onClick={() => props.onSaveRepo(repo)}>
-                <Save size={15} />この設定を保存
-              </button>
+              <div className="button-row" style={{ marginTop: "12px", justifyContent: "space-between", alignItems: "center" }}>
+                <button className="text-button" onClick={() => props.onSaveRepo(repo)}>
+                  <Save size={15} />この設定を保存
+                </button>
+                <button
+                  className="button ghost small"
+                  title="VS Codeで開く"
+                  onClick={() => props.onOpenVsCode(repo.path)}
+                >
+                  <Code size={14} />VS Codeで開く
+                </button>
+              </div>
             </>
           )}
         </article>
@@ -754,6 +779,7 @@ function CompanyDashboard(props: {
   onSetSequence: (repoId: string, displayName: string, currentConfirmed: number) => void;
   onSetAllRepoSequence: () => void;
   onDiagnostics: () => void;
+  onOpenVsCode: (path: string) => void;
 }) {
   return <>
     <section className="hero company-hero">
@@ -850,6 +876,13 @@ function CompanyDashboard(props: {
                     onClick={() => props.onSetSequence(repo.repo_id, repo.display_name, repo.confirmed_sequence)}
                   >
                     <Hash size={14} />開始番号設定
+                  </button>
+                  <button
+                    className="button ghost small"
+                    title="VS Codeで開く"
+                    onClick={() => props.onOpenVsCode(repo.path)}
+                  >
+                    <Code size={14} />VS Codeで開く
                   </button>
                 </div>
               </div>
