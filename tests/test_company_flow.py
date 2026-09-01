@@ -10,6 +10,7 @@
 - test_list_company_repositories: 会社側リポジトリ一覧および状態取得の検証
 - test_init_repository_sequence_and_apply_from_sequence_two: 適用開始番号指定によるstate.json生成と連番スキップ適用の検証
 - test_init_all_repositories_sequence: 全リポジトリ一括での適用開始番号初期化・state.json生成検証
+- test_apply_auto_commits_uncommitted_changes_and_immediately_commits_patch: 未コミット変更の自動事前コミットとパッチ適用の即時確定・クリーン化検証
 """
 from __future__ import annotations
 
@@ -493,6 +494,75 @@ def test_init_all_repositories_sequence(tmp_path: Path, git_helpers) -> None:
         assert state_file.is_file()
         state = load_state(app, app.name)
         assert state["confirmed_sequence"] == 2
+
+
+def test_apply_auto_commits_uncommitted_changes_and_immediately_commits_patch(
+    tmp_path: Path, git_helpers
+) -> None:
+    """
+    会社側に未コミット変更（手動編集や残骸）がある状態からパッチを適用した際、
+    既存変更が自動コミットされ、さらにパッチ自体も即座にコミットされて作業ツリーがクリーンになるテスト
+    """
+    git, init_repo = git_helpers
+
+    # 自宅側: base -> patch1
+    home = init_repo(tmp_path / "home-app")
+    (home / "app.txt").write_text("v0\n", encoding="utf-8")
+    git(home, "add", "-A")
+    git(home, "commit", "-m", "c0")
+    c0 = git(home, "rev-parse", "HEAD").decode().strip()
+
+    (home / "app.txt").write_text("v1-patch\n", encoding="utf-8")
+    (home / "added.txt").write_text("new file\n", encoding="utf-8")
+    git(home, "add", "-A")
+    git(home, "commit", "-m", "c1")
+    c1 = git(home, "rev-parse", "HEAD").decode().strip()
+
+    zip_path = make_package_repo(tmp_path / "patch_out", home, git, [(c0, c1)])
+
+    # 会社側: base を作成後、手動でファイルを未コミット変更（または未追跡ファイル）として追加
+    company_root = tmp_path / "company-apps"
+    company = init_repo(company_root / "sample-app")
+    (company / "app.txt").write_text("v0\n", encoding="utf-8")
+    git(company, "add", "-A")
+    git(company, "commit", "-m", "company base")
+
+    # 未コミットの変更を作成（state.json には pending はない状態）
+    (company / "manual_work.txt").write_text("uncommitted work\n", encoding="utf-8")
+    status_before = git(company, "status", "--porcelain").decode().strip()
+    assert status_before != ""  # 未コミットの変更が存在する
+
+    settings = Settings(
+        mode="company",
+        company_apps_root=str(company_root),
+        download_dir=str(zip_path.parent),
+        patch_password=PASSWORD,
+    )
+
+    # パッチ適用を実行
+    res = apply_archive(settings, str(zip_path))
+    assert res["failed"] == 0
+    assert res["succeeded"] == 1
+
+    # 検証1: パッチ適用直後に作業ツリーが完全にクリーンであること（未コミット変更が0件）
+    status_after = git(company, "status", "--porcelain").decode().strip()
+    assert status_after == ""
+
+    # 検証2: 手動変更が事前にコミットされ、パッチもコミットされていること
+    logs = git(company, "log", "-2", "--pretty=%s").decode().strip().splitlines()
+    assert logs[0] == "[myao-patch] sample-app patch-000001"
+    assert logs[1] == "[myao-patch] sample-app update"
+
+    # 検証3: パッチ内容および手動変更が両方保持されていること
+    assert (company / "app.txt").read_text(encoding="utf-8") == "v1-patch\n"
+    assert (company / "added.txt").read_text(encoding="utf-8") == "new file\n"
+    assert (company / "manual_work.txt").read_text(encoding="utf-8") == "uncommitted work\n"
+
+    # 検証4: state.json が confirmed_sequence: 1, pending: [] であること
+    state = load_state(company, "sample-app")
+    assert state["confirmed_sequence"] == 1
+    assert state["pending_sequences"] == []
+
 
 
 
