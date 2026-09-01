@@ -3,7 +3,7 @@
 
 仕様:
 - test_independent_git_history_apply_then_auto_commit: 独立Git履歴へのパッチ適用・新規ファイル自動配置・削除ファイル反映・自動コミット検証
-- test_unexpected_files_fails_without_changing_company_files: 想定外ファイル存在時のロールバック検証
+- test_apply_succeeds_even_with_company_specific_files: 会社側独自ファイル存在時でも安全にパッチ適用・コミットされ独自ファイルも保持される検証
 - test_apply_with_added_and_deleted_files_and_rollback: 新規ファイル自動配置と削除ファイル処理および失敗時の完全復元検証
 - test_force_overwrite_and_delete_applies_directly: git applyを使わずファイル直接上書き配置と削除で同期するテスト
 - test_single_repository_commit_pending: リポジトリID指定での個別コミット検証
@@ -190,8 +190,8 @@ def test_independent_git_history_apply_then_auto_commit(tmp_path: Path, git_help
     assert state["pending_sequences"] == []
 
 
-def test_unexpected_files_fails_without_changing_company_files(tmp_path: Path, git_helpers) -> None:
-    """想定外のファイル差分がある場合は適用が失敗し、会社側ファイルが元通り復元されるテスト"""
+def test_apply_succeeds_even_with_company_specific_files(tmp_path: Path, git_helpers) -> None:
+    """会社側リポジトリに独自ファイルが存在していても、パッチ適用と即時コミットが成功し、独自ファイルも保持されるテスト"""
     git, init_repo = git_helpers
     source = init_repo(tmp_path / "source")
     (source / "app.txt").write_text("expected base\n", encoding="utf-8")
@@ -206,10 +206,9 @@ def test_unexpected_files_fails_without_changing_company_files(tmp_path: Path, g
     company_root = tmp_path / "company-apps"
     company = init_repo(company_root / "sample-app")
     (company / "app.txt").write_text("expected base\n", encoding="utf-8")
-    (company / "unexpected_extra.txt").write_text("unexpected\n", encoding="utf-8")
+    (company / "company_extra.txt").write_text("company specific\n", encoding="utf-8")
     git(company, "add", "-A")
     git(company, "commit", "-m", "company base with extra file")
-    before = git(company, "rev-parse", "HEAD").decode().strip()
 
     package = make_package_repo(tmp_path / "package", source, git, [(base, target)])
     settings = Settings(
@@ -219,11 +218,17 @@ def test_unexpected_files_fails_without_changing_company_files(tmp_path: Path, g
         patch_password=PASSWORD,
     )
     result = apply_archive(settings, str(package))
-    assert result["failed"] == 1
-    assert (company / "app.txt").read_text(encoding="utf-8") == "expected base\n"
-    assert (company / "unexpected_extra.txt").read_text(encoding="utf-8") == "unexpected\n"
-    assert git(company, "rev-parse", "HEAD").decode().strip() == before
-    assert git(company, "status", "--porcelain").decode() == ""
+    assert result["failed"] == 0
+    assert result["succeeded"] == 1
+    # パッチ対象ファイルが正しく上書き更新されていること
+    assert (company / "app.txt").read_text(encoding="utf-8") == "new value\n"
+    # 会社側独自ファイルも消えずに保持されていること
+    assert (company / "company_extra.txt").read_text(encoding="utf-8") == "company specific\n"
+    # 即時コミットされ、作業ツリーが完全にクリーンであること
+    assert git(company, "status", "--porcelain").decode().strip() == ""
+    # コミットログに patch-000001 が記録されていること
+    log = git(company, "log", "-1", "--pretty=%s").decode().strip()
+    assert log == "[myao-patch] sample-app patch-000001"
 
 
 def test_apply_with_added_and_deleted_files_and_rollback(tmp_path: Path, git_helpers) -> None:
