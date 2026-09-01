@@ -4,6 +4,8 @@ APIエンドポイントおよびPWA配信セキュリティのテスト
 仕様:
 - test_api_requires_session_token_for_mutation: 状態変更APIに対するセッショントークン検証
 - test_pwa_is_served_with_local_only_security_headers: PWA静的ファイル配信とローカル専用セキュリティヘッダーの検証
+- test_company_api_repositories_and_commit: 会社側リポジトリ一覧・個別コミットAPIの検証
+- test_company_api_init_sequence: 会社側リポジトリ適用開始番号指定APIおよびstate.json生成の検証
 """
 from __future__ import annotations
 
@@ -75,4 +77,54 @@ def test_company_api_repositories_and_commit(tmp_path, git_helpers) -> None:
     results = commit_res.json()["results"]
     assert len(results) == 1
     assert results[0]["status"] == "committed"
+
+
+def test_company_api_init_sequence(tmp_path, git_helpers) -> None:
+    """会社側リポジトリの適用開始番号指定APIおよびstate.json生成のテスト"""
+    git, init_repo = git_helpers
+    company_root = tmp_path / "company-apps"
+    app_repo = init_repo(company_root / "my-app")
+    (app_repo / "main.py").write_text("print('hello')\n", encoding="utf-8")
+    git(app_repo, "add", "-A")
+    git(app_repo, "commit", "-m", "init")
+
+    store = SettingsStore(tmp_path / "settings.local.json")
+    store.update({"mode": "company", "company_apps_root": str(company_root)})
+    client = TestClient(create_app(store))
+
+    token = client.get("/api/session").json()["token"]
+
+    # 1. 個別リポジトリの開始番号設定（start_sequence=2）
+    res = client.post(
+        "/api/company/repositories/my-app/sequence",
+        json={"start_sequence": 2},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["repo_id"] == "my-app"
+    assert data["start_sequence"] == 2
+    assert data["confirmed_sequence"] == 1
+
+    # state.json が実際に生成されていることを確認
+    state_file = app_repo / ".git" / "rep-patch" / "state.json"
+    assert state_file.is_file()
+
+    # 2. 一覧APIに反映されているか確認
+    repos_res = client.get("/api/company/repositories")
+    assert repos_res.status_code == 200
+    target_repo = next(r for r in repos_res.json()["repositories"] if r["repo_id"] == "my-app")
+    assert target_repo["confirmed_sequence"] == 1
+
+    # 3. 全リポジトリ一括の開始番号設定（start_sequence=5）
+    res_all = client.post(
+        "/api/company/repositories/sequence-all",
+        json={"start_sequence": 5},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res_all.status_code == 200
+    results_all = res_all.json()["results"]
+    assert len(results_all) == 1
+    assert results_all[0]["confirmed_sequence"] == 4
+
 

@@ -8,6 +8,8 @@
 - test_force_overwrite_and_delete_applies_directly: git applyを使わずファイル直接上書き配置と削除で同期するテスト
 - test_single_repository_commit_pending: リポジトリID指定での個別コミット検証
 - test_list_company_repositories: 会社側リポジトリ一覧および状態取得の検証
+- test_init_repository_sequence_and_apply_from_sequence_two: 適用開始番号指定によるstate.json生成と連番スキップ適用の検証
+- test_init_all_repositories_sequence: 全リポジトリ一括での適用開始番号初期化・state.json生成検証
 """
 from __future__ import annotations
 
@@ -15,8 +17,18 @@ import json
 import zipfile
 from pathlib import Path
 
-from rep_patch.company import apply_archive, commit_pending, list_company_repositories, load_state
+import pytest
+
+from rep_patch.company import (
+    apply_archive,
+    commit_pending,
+    init_all_repositories_sequence,
+    init_repository_sequence,
+    list_company_repositories,
+    load_state,
+)
 from rep_patch.config import Settings
+from rep_patch.errors import RepPatchError
 from rep_patch.git import changed_paths, diff_file_status, tracked_files
 from rep_patch.packages import PACKAGE_TYPE, SCHEMA_VERSION, split_patch
 from rep_patch.security import sha256_bytes, sign_document
@@ -376,6 +388,110 @@ def test_list_company_repositories(tmp_path: Path, git_helpers) -> None:
         assert "clean" in r
         assert "pending_sequences" in r
         assert "head" in r
+
+
+def test_init_repository_sequence_and_apply_from_sequence_two(tmp_path: Path, git_helpers) -> None:
+    """適用開始番号を指定してstate.jsonを自動生成し、連番2からパッチを適用できるテスト"""
+    git, init_repo = git_helpers
+
+    # 自宅側: commit0 -> commit1 (連番1) -> commit2 (連番2) を作成
+    home = init_repo(tmp_path / "home-app")
+    (home / "file1.txt").write_text("v0\n", encoding="utf-8")
+    git(home, "add", "-A")
+    c0 = git(home, "commit", "-m", "c0")
+
+    (home / "file1.txt").write_text("v1\n", encoding="utf-8")
+    git(home, "add", "-A")
+    c1 = git(home, "commit", "-m", "c1")
+
+    (home / "file2.txt").write_text("v2-new\n", encoding="utf-8")
+    git(home, "add", "-A")
+    c2 = git(home, "commit", "-m", "c2")
+
+    # パッチZIP作成 (連番1: c0->c1, 連番2: c1->c2)
+    package_repo = make_package_repo(tmp_path, home, git, [(c0, c1), (c1, c2)])
+    zip_path = make_patch_zip(tmp_path / "Downloads", package_repo)
+
+    # 会社側: c1の状態と同じファイル構成で初期コミット (連番1適用済み相当)
+    company_root = tmp_path / "company-apps"
+    company = init_repo(company_root / "sample-app")
+    (company / "file1.txt").write_text("v1\n", encoding="utf-8")
+    git(company, "add", "-A")
+    git(company, "commit", "-m", "base matches c1")
+
+    settings = Settings(
+        mode="company",
+        company_apps_root=str(company_root),
+        download_dir=str(tmp_path / "Downloads"),
+        patch_password=PASSWORD,
+    )
+
+    # 最初は state.json が存在しないことを確認
+    state_file = company / ".git" / "rep-patch" / "state.json"
+    assert not state_file.exists()
+
+    # 不正な開始連番（0以下）はエラーになることを検証
+    with pytest.raises(RepPatchError):
+        init_repository_sequence(settings, "sample-app", start_sequence=0)
+
+    # 適用開始番号を 2 に指定して初期化
+    res = init_repository_sequence(settings, "sample-app", start_sequence=2)
+    assert res["repo_id"] == "sample-app"
+    assert res["start_sequence"] == 2
+    assert res["confirmed_sequence"] == 1
+
+    # state.json が自動生成され、confirmed_sequence が 1 になっていることを確認
+    assert state_file.is_file()
+    state = load_state(company, "sample-app")
+    assert state["confirmed_sequence"] == 1
+    assert state["pending_sequences"] == []
+
+    # パッチZIPを適用 -> 連番1はスキップされ、連番2のみが適用される
+    apply_res = apply_archive(settings, str(zip_path))
+    assert apply_res["failed"] == 0
+    assert apply_res["succeeded"] == 1
+    result_item = apply_res["results"][0]
+    assert result_item["status"] == "applied"
+    assert result_item["pending_sequences"] == [2]
+
+    # 連番2の新規ファイルが存在することを確認
+    assert (company / "file2.txt").read_text(encoding="utf-8") == "v2-new\n"
+
+
+def test_init_all_repositories_sequence(tmp_path: Path, git_helpers) -> None:
+    """全リポジトリ一括で適用開始番号を指定してstate.jsonを生成できるテスト"""
+    git, init_repo = git_helpers
+    company_root = tmp_path / "company-apps"
+    app1 = init_repo(company_root / "app-one")
+    (app1 / "file.txt").write_text("app1\n", encoding="utf-8")
+    git(app1, "add", "-A")
+    git(app1, "commit", "-m", "app1 init")
+
+    app2 = init_repo(company_root / "app-two")
+    (app2 / "file.txt").write_text("app2\n", encoding="utf-8")
+    git(app2, "add", "-A")
+    git(app2, "commit", "-m", "app2 init")
+
+    settings = Settings(
+        mode="company",
+        company_apps_root=str(company_root),
+        patch_password=PASSWORD,
+    )
+
+    # 一括初期化（開始番号 3 -> confirmed_sequence = 2）
+    results = init_all_repositories_sequence(settings, start_sequence=3)
+    assert len(results) == 2
+    for item in results:
+        assert item["start_sequence"] == 3
+        assert item["confirmed_sequence"] == 2
+
+    # 各リポジトリに state.json が作成されたことを確認
+    for app in [app1, app2]:
+        state_file = app / ".git" / "rep-patch" / "state.json"
+        assert state_file.is_file()
+        state = load_state(app, app.name)
+        assert state["confirmed_sequence"] == 2
+
 
 
 
