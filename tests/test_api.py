@@ -7,6 +7,7 @@ APIエンドポイントおよびPWA配信セキュリティのテスト
 - test_company_api_repositories_and_commit: 会社側リポジトリ一覧・個別コミットAPIの検証
 - test_company_api_init_sequence: 会社側リポジトリ適用開始番号指定APIおよびstate.json生成の検証
 - test_api_open_vscode: VS Code起動APIの検証（正常系・異常系・VS Code未検出）
+- test_company_api_delete_repository: 会社側リポジトリカードの削除（除外）APIおよび一覧からの非表示、実ディレクトリ保持の検証
 """
 from __future__ import annotations
 
@@ -181,6 +182,64 @@ def test_api_open_vscode(tmp_path, monkeypatch) -> None:
     )
     assert res_no_code.status_code == 400
     assert "VS Code" in res_no_code.json()["detail"]
+
+
+def test_company_api_delete_repository(tmp_path, git_helpers) -> None:
+    """会社側リポジトリカードの削除（除外）APIのテスト"""
+    git, init_repo = git_helpers
+    company_root = tmp_path / "company-apps"
+    repo1 = init_repo(company_root / "app-one")
+    (repo1 / "main.py").write_text("print('one')\n", encoding="utf-8")
+    git(repo1, "add", "-A")
+    git(repo1, "commit", "-m", "init one")
+
+    repo2 = init_repo(company_root / "app-two")
+    (repo2 / "main.py").write_text("print('two')\n", encoding="utf-8")
+    git(repo2, "add", "-A")
+    git(repo2, "commit", "-m", "init two")
+
+    store = SettingsStore(tmp_path / "settings.local.json")
+    store.update({"mode": "company", "company_apps_root": str(company_root)})
+    client = TestClient(create_app(store))
+
+    # 初期状態で2つのリポジトリが検出される
+    res = client.get("/api/company/repositories")
+    assert res.status_code == 200
+    repos = res.json()["repositories"]
+    assert len(repos) == 2
+    repo_ids = [r["repo_id"] for r in repos]
+    assert "app-one" in repo_ids
+    assert "app-two" in repo_ids
+
+    # トークンなしでの削除は403
+    res_no_token = client.delete("/api/company/repositories/app-one")
+    assert res_no_token.status_code == 403
+
+    # トークンありで app-one のカードを削除
+    token = client.get("/api/session").json()["token"]
+    del_res = client.delete(
+        "/api/company/repositories/app-one",
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert del_res.status_code == 200
+    assert del_res.json() == {"deleted": True, "repo_id": "app-one"}
+
+    # 削除後、一覧から app-one が除外され app-two のみになる
+    res_after = client.get("/api/company/repositories")
+    assert res_after.status_code == 200
+    repos_after = res_after.json()["repositories"]
+    assert len(repos_after) == 1
+    assert repos_after[0]["repo_id"] == "app-two"
+
+    # 実ディレクトリおよびファイル・Git履歴は保持されている
+    assert (repo1 / "main.py").exists()
+    assert (repo1 / ".git").is_dir()
+    assert (repo1 / "main.py").read_text(encoding="utf-8") == "print('one')\n"
+
+    # 設定ファイルに除外IDが保存されている
+    loaded = store.load()
+    assert "app-one" in loaded.company_excluded_repo_ids
+
 
 
 
