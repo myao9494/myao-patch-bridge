@@ -51,6 +51,7 @@ export interface Settings {
   listen_port: number;
   chunk_size_mib: number;
   company_repo_paths: Record<string, string>;
+  company_excluded_repo_ids?: string[];
   repositories: Record<string, Repository>;
 }
 

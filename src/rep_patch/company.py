@@ -3,7 +3,8 @@
 
 仕様:
 - list_download_packages: ダウンロードフォルダからパッチZIP一覧を取得
-- list_company_repositories: 会社側で登録・検出されたリポジトリ一覧および未コミット・保留状態を取得
+- list_company_repositories: 会社側で登録・検出されたリポジトリ一覧および未コミット・保留状態を取得（除外リポジトリをフィルタ）
+- delete_company_repository: 指定リポジトリを会社側の管理対象・一覧から除外
 - inspect_archive: ZIP内の署名・SHA-256・メタデータおよび会社側リポジトリ対応状況を検証
 - apply_archive: 各アプリへパッチを適用（変更・新規ファイル直接上書き配置・削除ファイル消去・事前自動コミット・即時コミット確定・安全なバックアップ保持）
 - commit_pending: 動作確認済みの保留中パッチ（一括または個別）をGitコミット
@@ -17,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import Settings
+from .config import Settings, SettingsStore
 from .errors import PackageValidationError, RepPatchError
 from .git import ensure_repository, repository_status, run_git
 from .home import repo_id_for
@@ -339,6 +340,9 @@ def apply_archive(
                 continue
             latest_manifest = all_packages[-1].manifest
             display_name = latest_manifest["display_name"]
+            if not only_repo_id and repo_id in settings.company_excluded_repo_ids:
+                results.append(_result(repo_id, display_name, "unchanged", "会社側の管理対象外（除外設定中）のためスキップしました"))
+                continue
             try:
                 repo = resolve_company_repo(settings, latest_manifest)
                 state = load_state(repo, repo_id)
@@ -390,7 +394,10 @@ def list_company_repositories(settings: Settings) -> list[dict[str, Any]]:
             candidates[r_id] = (p.name, p, kind)
 
     results: list[dict[str, Any]] = []
+    excluded = set(settings.company_excluded_repo_ids)
     for repo_id, (display_name, path, kind) in sorted(candidates.items(), key=lambda item: item[1][0].lower()):
+        if repo_id in excluded:
+            continue
         try:
             status = repository_status(path)
             state = load_state(path, repo_id)
@@ -422,6 +429,21 @@ def list_company_repositories(settings: Settings) -> list[dict[str, Any]]:
                 "error": str(exc),
             })
     return results
+
+
+def delete_company_repository(
+    settings: Settings, store: SettingsStore, repo_id: str
+) -> dict[str, Any]:
+    """
+    指定されたリポジトリを会社側の管理対象・一覧から除外する
+    ※ローカルのGitリポジトリ実体やファイルは削除しない
+    """
+    if repo_id not in settings.company_excluded_repo_ids:
+        settings.company_excluded_repo_ids.append(repo_id)
+    if repo_id in settings.company_repo_paths:
+        del settings.company_repo_paths[repo_id]
+    store.save(settings)
+    return {"deleted": True, "repo_id": repo_id}
 
 
 def commit_pending(settings: Settings, repo_id: str | None = None) -> dict[str, Any]:

@@ -6,7 +6,7 @@ Myao Patch Bridge のローカル REST API サーバー
 - 設定管理（GET/PUT /api/settings）
 - リポジトリ管理（GET /api/repositories, POST /api/repositories, PUT /api/repositories/{repo_id}, DELETE /api/repositories/{repo_id}, POST /api/repositories/discover）
 - 自宅パッチ公開（POST /api/home/publish）
-- 会社パッチ適用・検証・コミット・一覧・適用開始番号初期化（GET /api/company/repositories, GET /api/company/downloads, POST /api/company/inspect, POST /api/company/apply-all, POST /api/company/retry, POST /api/company/commit-pending, POST /api/company/repositories/{repo_id}/sequence, POST /api/company/repositories/sequence-all）
+- 会社パッチ適用・検証・コミット・一覧・カード削除・適用開始番号初期化（GET /api/company/repositories, DELETE /api/company/repositories/{repo_id}, GET /api/company/downloads, POST /api/company/inspect, POST /api/company/apply-all, POST /api/company/retry, POST /api/company/commit-pending, POST /api/company/repositories/{repo_id}/sequence, POST /api/company/repositories/sequence-all）
 - VS Code起動（POST /api/open-vscode）
 - 診断機能（GET /api/diagnostics）
 - フロントエンドSPA配信
@@ -28,6 +28,7 @@ from . import __version__
 from .company import (
     apply_archive,
     commit_pending,
+    delete_company_repository,
     init_all_repositories_sequence,
     init_repository_sequence,
     inspect_archive,
@@ -168,6 +169,11 @@ def create_app(store: SettingsStore | None = None) -> FastAPI:
     @app.get("/api/company/repositories")
     def company_repositories() -> dict[str, Any]:
         return {"repositories": list_company_repositories(settings_store.load())}
+
+    @app.delete("/api/company/repositories/{repo_id}")
+    def delete_company_repo(repo_id: str) -> dict[str, Any]:
+        settings = settings_store.load()
+        return delete_company_repository(settings, settings_store, repo_id)
 
     @app.get("/api/company/downloads")
     def downloads() -> dict[str, Any]:

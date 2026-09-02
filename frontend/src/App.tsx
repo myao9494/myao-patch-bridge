@@ -11,6 +11,7 @@
  * - 会社モード（CompanyDashboard）:
  *   - ダウンロード済みパッチZIPの検索・選択・署名検証
  *   - 会社側リポジトリへの差分適用・復元・コミット
+ *   - リポジトリカードの削除（管理対象からの除外）
  *   - 適用開始番号の指定とstate.json自動生成（個別・一括）
  *   - 会社側環境診断
  * - 共通: 設定ドロワー、PWAインストールプロンプト、通知・エラーバナー、VS Code起動
@@ -70,6 +71,7 @@ const emptySettings: Settings = {
   listen_port: 17345,
   chunk_size_mib: 20,
   company_repo_paths: {},
+  company_excluded_repo_ids: [],
   repositories: {},
 };
 
@@ -239,6 +241,24 @@ export default function App() {
     if (value) {
       setNotice(`リポジトリ「${repository.display_name}」を削除しました`);
       await loadRepositories();
+    }
+  };
+
+  const deleteCompanyRepository = async (repository: CompanyRepository) => {
+    const ok = window.confirm(
+      `リポジトリ「${repository.display_name}」のカードを削除しますか？\n\n※ローカルのファイルやGitリポジトリは削除されず、本ツールの管理対象からのみ除外されます。`
+    );
+    if (!ok) return;
+
+    const value = await perform(`${repository.display_name}を削除中`, () =>
+      api<{ deleted: boolean; repo_id: string }>(`/api/company/repositories/${repository.repo_id}`, {
+        method: "DELETE",
+      })
+    );
+    if (value) {
+      setNotice(`リポジトリ「${repository.display_name}」のカードを削除しました`);
+      await loadCompanyRepositories();
+      await loadSettings();
     }
   };
 
@@ -468,6 +488,7 @@ export default function App() {
             onCommitSingle={commitSingle}
             onSetSequence={setRepoSequence}
             onSetAllRepoSequence={setAllRepoSequence}
+            onDeleteRepo={deleteCompanyRepository}
             onDiagnostics={runChecks}
             onOpenVsCode={openVsCode}
           />
@@ -778,6 +799,7 @@ function CompanyDashboard(props: {
   onCommitSingle: (id: string) => void;
   onSetSequence: (repoId: string, displayName: string, currentConfirmed: number) => void;
   onSetAllRepoSequence: () => void;
+  onDeleteRepo: (repo: CompanyRepository) => void;
   onDiagnostics: () => void;
   onOpenVsCode: (path: string) => void;
 }) {
@@ -837,12 +859,22 @@ function CompanyDashboard(props: {
                 <h3>{repo.display_name}</h3>
                 <p>{repo.path}</p>
               </div>
-              <div className="repo-status-badge">
-                {!repo.clean ? (
-                  <span className="badge warning">未コミット変更 ({repo.changes}件)</span>
-                ) : (
-                  <span className="badge success">同期済み (#{String(repo.confirmed_sequence).padStart(6, "0")})</span>
-                )}
+              <div className="repo-header-actions">
+                <div className="repo-status-badge">
+                  {!repo.clean ? (
+                    <span className="badge warning">未コミット変更 ({repo.changes}件)</span>
+                  ) : (
+                    <span className="badge success">同期済み (#{String(repo.confirmed_sequence).padStart(6, "0")})</span>
+                  )}
+                </div>
+                <button
+                  className="icon-button delete-repo-btn"
+                  title="このリポジトリカードを削除"
+                  aria-label={`${repo.display_name} を削除`}
+                  onClick={() => props.onDeleteRepo(repo)}
+                >
+                  <Trash2 size={16} />
+                </button>
               </div>
             </div>
             {repo.error ? (
@@ -919,6 +951,37 @@ function SettingsDrawer(props: { settings: Settings; setSettings: (value: Settin
         <Field label="会社側アプリルート" value={s.company_apps_root} onChange={(company_apps_root) => patch({company_apps_root})}/>
         <Field label="会社側Obsidian設定" value={s.company_obsidian_repo} onChange={(company_obsidian_repo) => patch({company_obsidian_repo})}/>
         <Field label="ZIP検索フォルダ" value={s.download_dir} onChange={(download_dir) => patch({download_dir})}/>
+        {s.company_excluded_repo_ids && s.company_excluded_repo_ids.length > 0 && (
+          <div className="field">
+            <span>除外中のリポジトリカード ({s.company_excluded_repo_ids.length}件)</span>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "6px" }}>
+              {s.company_excluded_repo_ids.map((id) => (
+                <span key={id} className="badge warning" style={{ display: "inline-flex", alignItems: "center", gap: "5px" }}>
+                  {id}
+                  <button
+                    type="button"
+                    style={{ border: 0, background: "transparent", cursor: "pointer", padding: "0 2px", color: "inherit", fontWeight: "bold" }}
+                    title="除外を解除してカードを再表示"
+                    onClick={() => {
+                      const next = s.company_excluded_repo_ids?.filter((x) => x !== id) || [];
+                      patch({ company_excluded_repo_ids: next });
+                    }}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="text-action-button"
+              style={{ marginTop: "6px" }}
+              onClick={() => patch({ company_excluded_repo_ids: [] })}
+            >
+              すべての除外を解除
+            </button>
+          </div>
+        )}
       </>}
       <Field label="パッチ検証パスワード" type="password" placeholder={s.password_configured ? "設定済み（変更時のみ入力）" : "自宅と会社で同じ値"} value={s.patch_password} onChange={(patch_password) => patch({patch_password})}/>
       <div className="field-row"><Field label="ローカルポート" type="number" value={String(s.listen_port)} onChange={(value) => patch({listen_port:Number(value)})}/><Field label="分割サイズ (MiB)" type="number" value={String(s.chunk_size_mib)} onChange={(value) => patch({chunk_size_mib:Number(value)})}/></div>

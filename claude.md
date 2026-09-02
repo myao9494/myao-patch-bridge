@@ -38,6 +38,8 @@
 ### 会社モード (`company`)
 - **Node.js / npm 不要**: 同梱の `frontend/dist` を使用。
 - **Python 実行**: `.venv` なしでもシステムの Python で起動可能（`start_patch_app.bat` または `set PYTHONPATH=src && python -m rep_patch`）。
+- **リポジトリ管理・カード削除**:
+  - 管理対象外のリポジトリカードを削除（`DELETE /api/company/repositories/{repo_id}`）※実リポジトリは保持、設定画面から除外解除可能
 - **パッチ受信・検証**:
   - `Downloads` フォルダ内の `myao_app_patch*.zip` を検索・検証（署名・SHA-256・追加ファイル・リポジトリ対応状況の一致確認）。
 - **パッチ適用・コミット**:
@@ -45,7 +47,7 @@
   - **ファイル直接上書き配置・削除**: `git apply`（差分パッチ）や全ファイル完全一致チェックを使用せず、同梱された差分ファイル実体（`added_files/` 内の変更・新規ファイル）を直接上書き配置し、削除対象ファイルを確実に消去（会社側独自ファイルや改行コード差分と安全に共存）
   - **即時コミット確定**: ファイル配置完了と同時に `[myao-patch] アプリ名 patch-連番` としてGitコミットを即座に確定完了（常に未コミット変更のないクリーンな状態を維持）
   - **Gitユーザー情報自動補完**: 会社PCで `user.name` / `user.email` が未設定でも安全にコミットを遂行
-  - **リポジトリ個別操作**: 全リポジトリ一括適用に加え、リポジトリカード単位での「手動変更をコミット」「個別適用（再試行）」「VS Codeで開く」が可能
+  - **リポジトリ個別操作**: 全リポジトリ一括適用に加え、リポジトリカード単位での「手動変更をコミット」「個別適用（再試行）」「VS Codeで開く」「カード削除」が可能
   - **適用開始番号指定とstate.json自動生成**: 過去エラーや連番スキップ（例: 2番から適用したい場合）に対応するため、リポジトリ個別または全アプリ一括で次回適用開始番号を指定可能。指定と同時に各リポジトリの `.git/rep-patch/state.json` を即座に自動生成・初期化
   - テスト不合格時は「修正パッチを重ねる」（`correction`）
 - **環境診断**:
@@ -80,10 +82,11 @@
 | `GET` | `/api/repositories` | 登録リポジトリ一覧・状態取得（自宅側） |
 | `POST` | `/api/repositories` | リポジトリ手動追加 |
 | `PUT` | `/api/repositories/{repo_id}` | リポジトリ設定更新 |
-| `DELETE` | `/api/repositories/{repo_id}` | リポジトリ登録削除 |
+| `DELETE` | `/api/repositories/{repo_id}` | リポジトリ登録削除（自宅側） |
 | `POST` | `/api/repositories/discover` | アプリルートからのリポジトリ自動再検出 |
 | `POST` | `/api/home/publish` | 自宅側パッチ作成・署名・公開 |
 | `GET` | `/api/company/repositories` | 会社側リポジトリ一覧・状態取得（個別操作用） |
+| `DELETE` | `/api/company/repositories/{repo_id}` | 会社側リポジトリカード削除（除外設定） |
 | `GET` | `/api/company/downloads` | 会社側パッチZIP一覧取得 |
 | `POST` | `/api/company/inspect` | パッチZIPの署名・内容検証 |
 | `POST` | `/api/company/apply-all` | 全リポジトリへのパッチ適用 |
@@ -96,7 +99,8 @@
 
 ---
 
-## 6. データ保存場所
+## 7. データ保存場所
 - 設定ファイル: `data/settings.local.json`（Git管理外）
 - 会社側適用状態ファイル: `<各リポジトリ>/.git/rep-patch/state.json`
+
 

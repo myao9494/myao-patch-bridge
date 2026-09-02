@@ -3,7 +3,7 @@
 
 仕様:
 - RepositoryConfig: 単一リポジトリの設定（repo_id, display_name, path, kind, enabled, branch, baseline_commit, published_commit）
-- Settings: アプリケーション全体設定（mode, 各種ルートパス, パスワード, 待受ポート, 分割サイズ, repositories）
+- Settings: アプリケーション全体設定（mode, 各種ルートパス, パスワード, 待受ポート, 分割サイズ, repositories, company_excluded_repo_ids）
 - SettingsStore: 設定のローカルJSON永続化（data/settings.local.json）およびバリデーション
 """
 from __future__ import annotations
@@ -53,6 +53,7 @@ class Settings:
     listen_port: int = 17345
     chunk_size_mib: int = 20
     company_repo_paths: dict[str, str] = field(default_factory=dict)
+    company_excluded_repo_ids: list[str] = field(default_factory=list)
     repositories: dict[str, RepositoryConfig] = field(default_factory=dict)
 
     @classmethod
@@ -62,6 +63,7 @@ class Settings:
             key: RepositoryConfig.from_dict(item)
             for key, item in raw.get("repositories", {}).items()
         }
+        raw["company_excluded_repo_ids"] = list(raw.get("company_excluded_repo_ids", []))
         allowed = cls.__dataclass_fields__.keys()
         return cls(**{key: raw[key] for key in allowed if key in raw})
 
