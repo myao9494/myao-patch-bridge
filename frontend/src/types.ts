@@ -8,6 +8,7 @@
  * - Settings: アプリケーション全体設定
  * - PackageSummary / DownloadPackage / OperationResult: パッチ送受信・適用関連型定義
  * - CompanyRepository / SequenceInitResult: 会社側リポジトリ個別状態および連番初期化型定義
+ * - ResetResult: リポジトリパッチ履歴リセット結果型定義
  */
 
 export type Mode = "home" | "company";
@@ -106,5 +107,14 @@ export interface SequenceInitResult {
   start_sequence: number;
   confirmed_sequence: number;
 }
+
+export interface ResetResult {
+  reset: boolean;
+  repo_id: string;
+  display_name: string;
+  message: string;
+  repository: Repository;
+}
+
 
 

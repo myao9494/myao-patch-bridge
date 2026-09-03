@@ -1,3 +1,11 @@
+/**
+ * Myao Patch Bridge UI スタイルシート
+ * 
+ * 仕様:
+ * - デザイントークン（カラー、タイポグラフィ、スペーシング）
+ * - レイアウト（ダッシュボード、グリッド、ツールバー、パネル）
+ * - コンポーネント（ボタン、バッジ、モーダル、ドロワー、カード）
+ */
 :root {
   font-family: "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
   color: #192723;
@@ -54,6 +62,8 @@ main { width: min(1420px, 90vw); margin: 0 auto; padding: 44px 0 90px; }
 .button.primary { background: var(--accent); border-color: var(--accent); color:white; }
 .button.dark { background: var(--ink); color:white; border-color: var(--ink); }
 .button.warning { background: #faedc7; border-color:#e0c672; color:#614e18; }
+.button.danger { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
+.button.danger:hover:not(:disabled) { background: #fecaca; }
 .button.full { width:100%; }
 .repo-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap:16px; }
 .repo-card, .panel, .action-panel, .results { background:var(--paper); border:1px solid var(--line); border-radius:4px; }

@@ -8,6 +8,7 @@
  *   - リポジトリカードの削除（管理対象からの除外）
  *   - リポジトリの有効/無効トグル（パッチ公開対象の選択）
  *   - リポジトリ設定の保存および未公開パッチの作成・公開
+ *   - リポジトリのパッチ履歴リセット（000001からの再作成・リモートパッチ削除・初期導入地点更新オプション）
  * - 会社モード（CompanyDashboard）:
  *   - ダウンロード済みパッチZIPの検索・選択・署名検証
  *   - 会社側リポジトリへの差分適用・復元・コミット
@@ -54,6 +55,7 @@ import type {
   PackageSummary,
   Repository,
   RepositoryCreatePayload,
+  ResetResult,
   Settings,
 } from "./types";
 
@@ -96,6 +98,7 @@ export default function App() {
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [drawer, setDrawer] = useState(false);
   const [addModalOpen, setAddModalOpen] = useState(false);
+  const [resetModalRepo, setResetModalRepo] = useState<Repository | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -240,6 +243,20 @@ export default function App() {
     );
     if (value) {
       setNotice(`リポジトリ「${repository.display_name}」を削除しました`);
+      await loadRepositories();
+    }
+  };
+
+  const resetRepository = async (repository: Repository, newBaseline?: string) => {
+    const value = await perform(`${repository.display_name}のパッチ履歴をリセット中`, () =>
+      api<ResetResult>(`/api/repositories/${repository.repo_id}/reset`, {
+        method: "POST",
+        ...jsonBody({ new_baseline_commit: newBaseline }),
+      })
+    );
+    if (value) {
+      setNotice(value.message);
+      setResetModalRepo(null);
       await loadRepositories();
     }
   };
@@ -465,6 +482,7 @@ export default function App() {
             onUpdateRepo={updateRepo}
             onSaveRepo={saveRepository}
             onDeleteRepo={deleteRepository}
+            onResetRepo={setResetModalRepo}
             onOpenAddModal={() => setAddModalOpen(true)}
             onToggleAll={toggleAllRepositories}
             onOpenVsCode={openVsCode}
@@ -502,6 +520,14 @@ export default function App() {
         />
       )}
 
+      {resetModalRepo && (
+        <ResetRepositoryModal
+          repo={resetModalRepo}
+          onClose={() => setResetModalRepo(null)}
+          onReset={resetRepository}
+        />
+      )}
+
       {drawer && <SettingsDrawer settings={settings} setSettings={setSettings} onSave={saveSettings} onClose={() => setDrawer(false)} />}
       {busy && <div className="busy-overlay"><div className="busy-card"><LoaderCircle className="spin" size={30}/><strong>{busy}</strong><span>この画面を閉じないでください</span></div></div>}
     </div>
@@ -517,6 +543,7 @@ function HomeDashboard(props: {
   onUpdateRepo: (id: string, value: Partial<Repository>) => void;
   onSaveRepo: (repo: Repository) => void;
   onDeleteRepo: (repo: Repository) => void;
+  onResetRepo: (repo: Repository) => void;
   onOpenAddModal: () => void;
   onToggleAll: (enable: boolean) => void;
   onOpenVsCode: (path: string) => void;
@@ -643,13 +670,22 @@ function HomeDashboard(props: {
                 <button className="text-button" onClick={() => props.onSaveRepo(repo)}>
                   <Save size={15} />この設定を保存
                 </button>
-                <button
-                  className="button ghost small"
-                  title="VS Codeで開く"
-                  onClick={() => props.onOpenVsCode(repo.path)}
-                >
-                  <Code size={14} />VS Codeで開く
-                </button>
+                <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                  <button
+                    className="button ghost small"
+                    title="パッチ履歴をリセットして#000001から再作成可能にします"
+                    onClick={() => props.onResetRepo(repo)}
+                  >
+                    <RotateCcw size={14} />リセット
+                  </button>
+                  <button
+                    className="button ghost small"
+                    title="VS Codeで開く"
+                    onClick={() => props.onOpenVsCode(repo.path)}
+                  >
+                    <Code size={14} />VS Codeで開く
+                  </button>
+                </div>
               </div>
             </>
           )}
@@ -664,6 +700,101 @@ function HomeDashboard(props: {
       )}
     </div>
   </>;
+}
+
+function ResetRepositoryModal(props: {
+  repo: Repository;
+  onClose: () => void;
+  onReset: (repo: Repository, newBaseline?: string) => Promise<void>;
+}) {
+  const [resetBaselineToHead, setResetBaselineToHead] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleConfirm = async () => {
+    setSubmitting(true);
+    try {
+      const newBaseline = resetBaselineToHead ? (props.repo.target_commit || undefined) : undefined;
+      await props.onReset(props.repo, newBaseline);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="modal-layer">
+      <button className="modal-scrim" onClick={props.onClose} aria-label="閉じる" />
+      <div className="modal-card">
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">RESET PATCHES</p>
+            <h2><RotateCcw size={20} />パッチ履歴をリセット</h2>
+          </div>
+          <button className="icon-button" onClick={props.onClose} aria-label="閉じる">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="modal-body">
+          <div style={{ marginBottom: "16px" }}>
+            <p style={{ margin: "0 0 4px", fontSize: "14px", fontWeight: 600 }}>
+              対象: {props.repo.display_name}
+            </p>
+            <p style={{ margin: 0, fontSize: "12px", color: "#6b746f" }}>
+              {props.repo.path}
+            </p>
+          </div>
+
+          <div style={{
+            background: "#fffbeb",
+            border: "1px solid #fef3c7",
+            borderRadius: "4px",
+            padding: "12px 14px",
+            fontSize: "13px",
+            lineHeight: 1.6,
+            color: "#92400e",
+            marginBottom: "16px",
+          }}>
+            <strong>【注意事項】</strong>
+            <ul style={{ margin: "6px 0 0", paddingLeft: "18px" }}>
+              <li>パッチ専用リポジトリ（リモート含む）からこのリポジトリの全パッチファイルが削除されます。</li>
+              <li>次回のパッチ作成番号は <strong>#000001</strong> にリセットされます。</li>
+              <li>公開済みコミットの記録がクリアされます。</li>
+            </ul>
+          </div>
+
+          <label style={{ display: "flex", gap: "10px", alignItems: "flex-start", cursor: "pointer", fontSize: "13px" }}>
+            <input
+              type="checkbox"
+              checked={resetBaselineToHead}
+              onChange={(e) => setResetBaselineToHead(e.target.checked)}
+              style={{ marginTop: "3px" }}
+            />
+            <div>
+              <strong>現在の最新コミット ({shortHash(props.repo.target_commit)}) を会社の初期導入地点にする</strong>
+              <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#6b746f" }}>
+                {resetBaselineToHead
+                  ? "現在のHEADを初期導入地点に更新し、今後追加された変更から新しく #000001 を作成します。"
+                  : `既存の初期導入地点 (${shortHash(props.repo.baseline_commit)}) を維持し、ここからの差分で次回 #000001 を作成します。`}
+              </p>
+            </div>
+          </label>
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="button ghost" onClick={props.onClose} disabled={submitting}>
+            キャンセル
+          </button>
+          <button
+            type="button"
+            className="button danger"
+            onClick={handleConfirm}
+            disabled={submitting}
+          >
+            <RotateCcw size={16} />
+            {submitting ? "リセット中..." : "パッチ履歴をリセット"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function AddRepositoryModal(props: {
