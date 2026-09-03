@@ -26,6 +26,7 @@
   - **自動検出**: アプリルート（`apps_root`）および Obsidian 設定（`obsidian_repo`）配下の Git リポジトリを一括検出
   - **手動追加**: 任意のパスを指定してリポジトリカードを追加（`POST /api/repositories`）
   - **カード削除**: 管理対象外のリポジトリカードを削除（`DELETE /api/repositories/{repo_id}`）※実リポジトリは保持
+  - **パッチ履歴リセット**: パッチ専用リポジトリ（リモート含む）から該当リポジトリの全パッチおよびインデックスを削除・pushし、公開済みコミットをクリアして次回パッチ連番を `#000001` にリセット（`POST /api/repositories/{repo_id}/reset`、初期導入地点の現在HEAD更新オプション対応）
   - **対象選択**: トグルスイッチまたは「すべて選択/すべて解除」でパッチ公開対象を選択
   - **設定管理**: 固定ブランチ、初期導入地点コミットの設定・保存
 - **パッチ公開 (`publish`)**:
@@ -83,6 +84,7 @@
 | `POST` | `/api/repositories` | リポジトリ手動追加 |
 | `PUT` | `/api/repositories/{repo_id}` | リポジトリ設定更新 |
 | `DELETE` | `/api/repositories/{repo_id}` | リポジトリ登録削除（自宅側） |
+| `POST` | `/api/repositories/{repo_id}/reset` | 単一リポジトリのパッチ履歴リセット・リモート削除・#000001再開 |
 | `POST` | `/api/repositories/discover` | アプリルートからのリポジトリ自動再検出 |
 | `POST` | `/api/home/publish` | 自宅側パッチ作成・署名・公開 |
 | `GET` | `/api/company/repositories` | 会社側リポジトリ一覧・状態取得（個別操作用） |
