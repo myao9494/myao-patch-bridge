@@ -8,6 +8,7 @@ APIエンドポイントおよびPWA配信セキュリティのテスト
 - test_company_api_init_sequence: 会社側リポジトリ適用開始番号指定APIおよびstate.json生成の検証
 - test_api_open_vscode: VS Code起動APIの検証（正常系・異常系・VS Code未検出）
 - test_company_api_delete_repository: 会社側リポジトリカードの削除（除外）APIおよび一覧からの非表示、実ディレクトリ保持の検証
+- test_home_api_reset_repository: 自宅側リポジトリパッチ履歴リセットAPI（POST /api/repositories/{repo_id}/reset）の検証
 """
 from __future__ import annotations
 
@@ -239,6 +240,78 @@ def test_company_api_delete_repository(tmp_path, git_helpers) -> None:
     # 設定ファイルに除外IDが保存されている
     loaded = store.load()
     assert "app-one" in loaded.company_excluded_repo_ids
+
+
+def test_home_api_reset_repository(tmp_path, git_helpers) -> None:
+    git, init_repo = git_helpers
+    source = init_repo(tmp_path / "source" / "sample-app")
+    git(source, "branch", "-M", "main")
+    (source / "app.txt").write_text("base\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "base")
+    baseline = git(source, "rev-parse", "HEAD").decode().strip()
+
+    (source / "app.txt").write_text("change 1\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "commit 1")
+
+    remote = tmp_path / "patch-remote.git"
+    remote.mkdir()
+    git(remote, "init", "--bare")
+    patch_repo = init_repo(tmp_path / "myao_app_patch")
+    git(patch_repo, "branch", "-M", "main")
+    (patch_repo / "README.md").write_text("patches\n", encoding="utf-8")
+    git(patch_repo, "add", "-A")
+    git(patch_repo, "commit", "-m", "initial")
+    git(patch_repo, "remote", "add", "origin", str(remote))
+    git(patch_repo, "push", "-u", "origin", "main")
+
+    from rep_patch.config import RepositoryConfig, Settings
+    from rep_patch.home import publish
+
+    settings_path = tmp_path / "settings.local.json"
+    store = SettingsStore(settings_path)
+    settings = Settings(
+        mode="home",
+        patch_repo=str(patch_repo),
+        patch_password="test-password",
+        repositories={
+            "sample-app": RepositoryConfig(
+                repo_id="sample-app",
+                display_name="sample-app",
+                path=str(source),
+                branch="main",
+                baseline_commit=baseline,
+            )
+        },
+    )
+    store.save(settings)
+
+    # パッチを公開
+    publish(settings, store)
+    assert (patch_repo / "packages" / "sample-app" / "000001").exists()
+    assert store.load().repositories["sample-app"].published_commit != ""
+
+    client = TestClient(create_app(store))
+
+    # トークンなしのリセット要求は403
+    res_no_token = client.post("/api/repositories/sample-app/reset", json={})
+    assert res_no_token.status_code == 403
+
+    # トークンありでリセット要求
+    token = client.get("/api/session").json()["token"]
+    res = client.post(
+        "/api/repositories/sample-app/reset",
+        json={},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["reset"] is True
+    assert data["repo_id"] == "sample-app"
+    assert not (patch_repo / "packages" / "sample-app").exists()
+    assert store.load().repositories["sample-app"].published_commit == ""
+
 
 
 
