@@ -8,11 +8,13 @@
 - update_repository: リポジトリのブランチや初期導入地点、有効無効状態を更新
 - scan_repositories: 登録済みリポジトリの未公開コミット数やクリーン状態を取得
 - publish: 登録済みで有効なリポジトリの差分パッチ作成・新規ファイル実体同梱・削除記録・署名・分割し、パッチリポジトリへpush
+- reset_repository_patches: 指定リポジトリのパッチ専用リポジトリ内パッケージ削除・インデックス再署名・pushおよび公開済みコミットの初期化
 """
 from __future__ import annotations
 
 import json
 import re
+import shutil
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -334,4 +336,63 @@ def publish(settings: Settings, store: SettingsStore) -> dict[str, Any]:
         "message": f"{len(created)}件のパッチを公開しました",
         "packages": created,
     }
+
+
+def reset_repository_patches(
+    settings: Settings,
+    store: SettingsStore,
+    repo_id: str,
+    new_baseline_commit: str | None = None,
+) -> dict[str, Any]:
+    """指定リポジトリのパッチ履歴をリセットし次回000001からパッチ再作成可能にする"""
+    if repo_id not in settings.repositories:
+        raise RepPatchError(f"リポジトリが登録されていません: {repo_id}")
+    config = settings.repositories[repo_id]
+    patch_root = Path(settings.patch_repo).expanduser()
+    ensure_repository(patch_root)
+    if not settings.patch_password:
+        raise RepPatchError("パッチ検証用パスワードを設定してください")
+
+    _push_pending(patch_root)
+
+    # 1. パッチ専用リポジトリの該当パッケージディレクトリを削除
+    target_repo_dir = patch_root / "packages" / repo_id
+    if target_repo_dir.exists():
+        shutil.rmtree(target_repo_dir)
+
+    # 2. package-index.json から該当 repo_id を除外して再署名
+    index_path = patch_root / "package-index.json"
+    index = load_index(index_path, settings.patch_password)
+    remaining_packages = [
+        item for item in index.get("packages", []) if item.get("repo_id") != repo_id
+    ]
+    index["packages"] = remaining_packages
+    unsigned_index = {key: value for key, value in index.items() if key != "signature"}
+    signed_index = sign_document(unsigned_index, settings.patch_password)
+    write_json(index_path, signed_index)
+
+    # 3. パッチ専用リポジトリでコミット＆push
+    run_git(patch_root, ["add", "-A"])
+    diff_status = run_git(patch_root, ["status", "--porcelain=v1"]).text.strip()
+    if diff_status:
+        run_git(patch_root, ["commit", "-m", f"Reset patches for {config.display_name}"])
+        run_git(patch_root, ["push"])
+    else:
+        _push_pending(patch_root)
+
+    # 4. 自宅側設定の更新（published_commit のクリア、および任意で baseline_commit の更新）
+    config.published_commit = ""
+    if new_baseline_commit:
+        config.baseline_commit = resolve_commit(Path(config.path), new_baseline_commit)
+    settings.repositories[repo_id] = config
+    store.save(settings)
+
+    return {
+        "reset": True,
+        "repo_id": repo_id,
+        "display_name": config.display_name,
+        "message": f"{config.display_name} のパッチ履歴をリセットしました（次回パッチ連番: #000001）",
+        "repository": asdict(config),
+    }
+
 

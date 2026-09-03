@@ -4,7 +4,7 @@ Myao Patch Bridge のローカル REST API サーバー
 仕様:
 - ローカル限定アクセス（127.0.0.1）およびCSRF保護用セッショントークン検証
 - 設定管理（GET/PUT /api/settings）
-- リポジトリ管理（GET /api/repositories, POST /api/repositories, PUT /api/repositories/{repo_id}, DELETE /api/repositories/{repo_id}, POST /api/repositories/discover）
+- リポジトリ管理（GET /api/repositories, POST /api/repositories, PUT /api/repositories/{repo_id}, DELETE /api/repositories/{repo_id}, POST /api/repositories/{repo_id}/reset, POST /api/repositories/discover）
 - 自宅パッチ公開（POST /api/home/publish）
 - 会社パッチ適用・検証・コミット・一覧・カード削除・適用開始番号初期化（GET /api/company/repositories, DELETE /api/company/repositories/{repo_id}, GET /api/company/downloads, POST /api/company/inspect, POST /api/company/apply-all, POST /api/company/retry, POST /api/company/commit-pending, POST /api/company/repositories/{repo_id}/sequence, POST /api/company/repositories/sequence-all）
 - VS Code起動（POST /api/open-vscode）
@@ -43,6 +43,7 @@ from .home import (
     delete_repository,
     discover_repositories,
     publish,
+    reset_repository_patches,
     scan_repositories,
     update_repository,
 )
@@ -63,6 +64,11 @@ class RepositoryCreate(BaseModel):
 
 class RepositoryUpdate(BaseModel):
     values: dict[str, Any]
+
+
+class RepositoryReset(BaseModel):
+    new_baseline_commit: str | None = None
+
 
 
 class ZipRequest(BaseModel):
@@ -160,6 +166,14 @@ def create_app(store: SettingsStore | None = None) -> FastAPI:
     def delete_repo(repo_id: str) -> dict[str, Any]:
         settings = settings_store.load()
         return delete_repository(settings, settings_store, repo_id)
+
+    @app.post("/api/repositories/{repo_id}/reset")
+    def reset_repo(
+        repo_id: str, payload: RepositoryReset | None = None
+    ) -> dict[str, Any]:
+        settings = settings_store.load()
+        new_baseline = payload.new_baseline_commit if payload else None
+        return reset_repository_patches(settings, settings_store, repo_id, new_baseline)
 
     @app.post("/api/home/publish")
     def publish_patches() -> dict[str, Any]:
