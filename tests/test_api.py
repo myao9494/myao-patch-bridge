@@ -7,6 +7,7 @@ APIエンドポイントおよびPWA配信セキュリティのテスト
 - test_company_api_repositories_and_commit: 会社側リポジトリ一覧・個別コミットAPIの検証
 - test_company_api_init_sequence: 会社側リポジトリ適用開始番号指定APIおよびstate.json生成の検証
 - test_api_open_vscode: VS Code起動APIの検証（正常系・異常系・VS Code未検出）
+- test_api_open_antigravity: Antigravity起動APIの検証（正常系・異常系・Antigravity未検出）
 - test_company_api_delete_repository: 会社側リポジトリカードの削除（除外）APIおよび一覧からの非表示、実ディレクトリ保持の検証
 - test_home_api_reset_repository: 自宅側リポジトリパッチ履歴リセットAPI（POST /api/repositories/{repo_id}/reset）の検証
 """
@@ -183,6 +184,64 @@ def test_api_open_vscode(tmp_path, monkeypatch) -> None:
     )
     assert res_no_code.status_code == 400
     assert "VS Code" in res_no_code.json()["detail"]
+
+
+def test_api_open_antigravity(tmp_path, monkeypatch) -> None:
+    """Antigravity起動APIのテスト（正常系・存在しないパス・Antigravity未検出）"""
+    store = SettingsStore(tmp_path / "settings.local.json")
+    client = TestClient(create_app(store))
+    token = client.get("/api/session").json()["token"]
+
+    target_dir = tmp_path / "sample-app"
+    target_dir.mkdir()
+
+    # 1. 正常系: antigravity-ide コマンドが見つかり、Popen が呼び出される
+    calls = []
+
+    def fake_which(cmd):
+        return "/usr/local/bin/antigravity-ide" if cmd in ("antigravity-ide", "antigravity") else None
+
+    def fake_popen(cmd):
+        calls.append(cmd)
+
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    res = client.post(
+        "/api/open-antigravity",
+        json={"path": str(target_dir)},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res.status_code == 200
+    assert res.json()["status"] == "ok"
+    assert len(calls) == 1
+    assert calls[0] == ["/usr/local/bin/antigravity-ide", str(target_dir)]
+
+    # 2. 異常系: 存在しないパス
+    res_missing = client.post(
+        "/api/open-antigravity",
+        json={"path": str(tmp_path / "not-exist")},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res_missing.status_code == 400
+    assert "見つかりません" in res_missing.json()["detail"] or "存在しません" in res_missing.json()["detail"]
+
+    # 3. 異常系: Antigravity がインストールされていない
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    # パス直接指定のフォールバックも存在しない前提にするため、Path.is_file/is_dirなどもモックするか、探索関数内で制御
+    # ここでは api 側で shutil.which や候補パスが見つからない場合に RepPatchError を送出することを想定
+    monkeypatch.setattr("rep_patch.api._find_antigravity_executable", lambda: None)
+    res_no_app = client.post(
+        "/api/open-antigravity",
+        json={"path": str(target_dir)},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res_no_app.status_code == 400
+    assert "Antigravity" in res_no_app.json()["detail"]
+
 
 
 def test_company_api_delete_repository(tmp_path, git_helpers) -> None:
