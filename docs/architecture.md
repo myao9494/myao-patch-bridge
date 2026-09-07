@@ -89,3 +89,9 @@ stateDiagram-v2
 - Service Workerは静的UIだけをキャッシュ
 - API、パス、ZIP、ログはキャッシュしない
 - PWAを開く前にPythonバックエンドを起動する必要がある
+
+## エディタ連携
+
+- **自宅モード**: 各リポジトリカードからローカルのAntigravity（Antigravity IDE）を起動（`POST /api/open-antigravity`）
+- **会社モード**: 各リポジトリカードからローカルのVS Codeを起動（`POST /api/open-vscode`）
+

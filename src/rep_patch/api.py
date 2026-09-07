@@ -7,7 +7,7 @@ Myao Patch Bridge のローカル REST API サーバー
 - リポジトリ管理（GET /api/repositories, POST /api/repositories, PUT /api/repositories/{repo_id}, DELETE /api/repositories/{repo_id}, POST /api/repositories/{repo_id}/reset, POST /api/repositories/discover）
 - 自宅パッチ公開（POST /api/home/publish）
 - 会社パッチ適用・検証・コミット・一覧・カード削除・適用開始番号初期化（GET /api/company/repositories, DELETE /api/company/repositories/{repo_id}, GET /api/company/downloads, POST /api/company/inspect, POST /api/company/apply-all, POST /api/company/retry, POST /api/company/commit-pending, POST /api/company/repositories/{repo_id}/sequence, POST /api/company/repositories/sequence-all）
-- VS Code起動（POST /api/open-vscode）
+- エディタ起動（POST /api/open-vscode, POST /api/open-antigravity）
 - 診断機能（GET /api/diagnostics）
 - フロントエンドSPA配信
 """
@@ -90,6 +90,38 @@ class SequenceInitRequest(BaseModel):
 
 class OpenVsCodeRequest(BaseModel):
     path: str
+
+
+class OpenAntigravityRequest(BaseModel):
+    path: str
+
+
+def _find_antigravity_executable() -> list[str] | None:
+    """Antigravity IDEまたはAntigravityの起動コマンド・パスを探索する"""
+    # 1. PATHからの探索
+    for name in ("antigravity-ide", "antigravity-ide.cmd", "antigravity", "antigravity.cmd"):
+        found = shutil.which(name)
+        if found:
+            return [found]
+
+    # 2. macOS / Linux 既知パスの探索
+    candidates = [
+        Path.home() / ".antigravity-ide" / "antigravity-ide" / "bin" / "antigravity-ide",
+        Path("/Applications/Antigravity IDE.app/Contents/Resources/app/bin/antigravity-ide"),
+        Path.home() / "Applications" / "Antigravity IDE.app" / "Contents" / "Resources" / "app" / "bin" / "antigravity-ide",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return [str(p)]
+
+    # 3. macOS open コマンドによるアプリ起動
+    if shutil.which("open"):
+        if Path("/Applications/Antigravity IDE.app").is_dir():
+            return ["open", "-a", "Antigravity IDE"]
+        if Path("/Applications/Antigravity.app").is_dir():
+            return ["open", "-a", "Antigravity"]
+
+    return None
 
 
 def create_app(store: SettingsStore | None = None) -> FastAPI:
@@ -241,6 +273,19 @@ def create_app(store: SettingsStore | None = None) -> FastAPI:
                 "VS Code (codeコマンド) が見つかりません。PATHにVS Codeが登録されているか確認してください。"
             )
         subprocess.Popen([code_cmd, str(target)])
+        return {"status": "ok", "path": str(target)}
+
+    @app.post("/api/open-antigravity")
+    def open_antigravity(payload: OpenAntigravityRequest) -> dict[str, Any]:
+        target = Path(payload.path).expanduser().resolve()
+        if not target.is_dir():
+            raise RepPatchError(f"指定されたディレクトリが存在しません: {target}")
+        cmd = _find_antigravity_executable()
+        if not cmd:
+            raise RepPatchError(
+                "Antigravity (antigravity-ideコマンド) が見つかりません。PATHにAntigravityが登録されているか確認してください。"
+            )
+        subprocess.Popen([*cmd, str(target)])
         return {"status": "ok", "path": str(target)}
 
     @app.get("/api/diagnostics")

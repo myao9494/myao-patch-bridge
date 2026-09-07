@@ -15,7 +15,7 @@
  *   - リポジトリカードの削除（管理対象からの除外）
  *   - 適用開始番号の指定とstate.json自動生成（個別・一括）
  *   - 会社側環境診断
- * - 共通: 設定ドロワー、PWAインストールプロンプト、通知・エラーバナー、VS Code起動
+ * - 共通: 設定ドロワー、PWAインストールプロンプト、通知・エラーバナー、エディタ起動（自宅: Antigravity、会社: VS Code）
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -43,6 +43,7 @@ import {
   Settings as SettingsIcon,
   ShieldCheck,
   Smartphone,
+  Sparkles,
   Square,
   Trash2,
   X,
@@ -453,6 +454,18 @@ export default function App() {
     }
   };
 
+  const openAntigravity = async (path: string) => {
+    const value = await perform("Antigravityを起動中", () =>
+      api<{ status: string; path: string }>("/api/open-antigravity", {
+        method: "POST",
+        ...jsonBody({ path }),
+      })
+    );
+    if (value) {
+      setNotice("Antigravityで開きました");
+    }
+  };
+
   const unpublished = useMemo(
     () => repositories.reduce((sum, item) => sum + (item.enabled ? item.unpublished_commits ?? 0 : 0), 0),
     [repositories]
@@ -485,7 +498,7 @@ export default function App() {
             onResetRepo={setResetModalRepo}
             onOpenAddModal={() => setAddModalOpen(true)}
             onToggleAll={toggleAllRepositories}
-            onOpenVsCode={openVsCode}
+            onOpenAntigravity={openAntigravity}
           />
         ) : (
           <CompanyDashboard
@@ -546,7 +559,7 @@ function HomeDashboard(props: {
   onResetRepo: (repo: Repository) => void;
   onOpenAddModal: () => void;
   onToggleAll: (enable: boolean) => void;
-  onOpenVsCode: (path: string) => void;
+  onOpenAntigravity: (path: string) => void;
 }) {
   const allEnabled = props.repositories.length > 0 && props.repositories.every((r) => r.enabled);
   const someEnabled = props.repositories.some((r) => r.enabled);
@@ -680,10 +693,10 @@ function HomeDashboard(props: {
                   </button>
                   <button
                     className="button ghost small"
-                    title="VS Codeで開く"
-                    onClick={() => props.onOpenVsCode(repo.path)}
+                    title="Antigravityで開く"
+                    onClick={() => props.onOpenAntigravity(repo.path)}
                   >
-                    <Code size={14} />VS Codeで開く
+                    <Sparkles size={14} />Antigravityで開く
                   </button>
                 </div>
               </div>

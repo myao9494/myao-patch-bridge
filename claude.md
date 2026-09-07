@@ -29,6 +29,7 @@
   - **パッチ履歴リセット**: パッチ専用リポジトリ（リモート含む）から該当リポジトリの全パッチおよびインデックスを削除・pushし、公開済みコミットをクリアして次回パッチ連番を `#000001` にリセット（`POST /api/repositories/{repo_id}/reset`、初期導入地点の現在HEAD更新オプション対応）
   - **対象選択**: トグルスイッチまたは「すべて選択/すべて解除」でパッチ公開対象を選択
   - **設定管理**: 固定ブランチ、初期導入地点コミットの設定・保存
+  - **エディタ連携**: 各リポジトリカードからワンクリックでローカルのAntigravity（Antigravity IDE）を開く（`POST /api/open-antigravity`）
 - **パッチ公開 (`publish`)**:
   - 選択・有効化されたリポジトリの未公開コミット差分をバイナリパッチ（20MiB分割可）として生成
   - **差分ファイル実体同梱**: 新規追加および変更されたファイルの実体を `added_files/` へ自動保存しハッシュ署名
@@ -56,9 +57,11 @@
 
 ---
 
-## 4. 共通機能
-- **VS Code連携**:
-  - 自宅モード・会社モード双方の各リポジトリカードからワンクリックでローカルのVS Codeを直接起動し、対象リポジトリを開く（`POST /api/open-vscode`、Windows `code.cmd` / macOS `code` 両対応）
+## 4. エディタ連携
+- **自宅側（Antigravity連携）**:
+  - 自宅モードの各リポジトリカードからワンクリックでローカルのAntigravity（Antigravity IDE）を起動し、対象リポジトリを開く（`POST /api/open-antigravity`）
+- **会社側（VS Code連携）**:
+  - 会社モードの各リポジトリカードからワンクリックでローカルのVS Codeを起動し、対象リポジトリを開く（`POST /api/open-vscode`、Windows `code.cmd` / macOS `code` 両対応）
 
 ---
 
@@ -96,7 +99,8 @@
 | `POST` | `/api/company/commit-pending` | 保留中パッチのGitコミット（一括または個別） |
 | `POST` | `/api/company/repositories/{repo_id}/sequence` | 単一リポジトリの次回適用開始番号指定・state.json生成 |
 | `POST` | `/api/company/repositories/sequence-all` | 全リポジトリ一括の次回適用開始番号指定・state.json生成 |
-| `POST` | `/api/open-vscode` | 指定ディレクトリをローカルVS Codeで開く |
+| `POST` | `/api/open-vscode` | 指定ディレクトリをローカルVS Codeで開く（会社側） |
+| `POST` | `/api/open-antigravity` | 指定ディレクトリをローカルAntigravityで開く（自宅側） |
 | `GET` | `/api/diagnostics` | 環境診断実行 |
 
 ---
