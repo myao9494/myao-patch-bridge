@@ -48,6 +48,9 @@ export interface Settings {
   download_dir: string;
   patch_password: string;
   password_configured: boolean;
+  github_token?: string;
+  github_token_configured?: boolean;
+  github_repo?: string;
   listen_host: string;
   listen_port: number;
   chunk_size_mib: number;
@@ -114,6 +117,18 @@ export interface ResetResult {
   display_name: string;
   message: string;
   repository: Repository;
+}
+
+export interface PublishResult {
+  published: boolean;
+  message: string;
+  packages: any[];
+  bundle_path?: string;
+  bundle_name?: string;
+  bundle_size?: number;
+  release_url?: string;
+  download_url?: string;
+  release_error?: string;
 }
 
 

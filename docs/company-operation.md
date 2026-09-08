@@ -44,9 +44,13 @@ PWAをインストールしてもPythonサーバーは必要です。利用前�
 
 ## 通常の週次運用
 
-### 1. ZIPを置く
+### 1. ZIPをダウンロードして置く
 
-自宅でGitHubの `myao_app_patch` をZIPダウンロードし、会社の `%USERPROFILE%\Downloads` へ置きます。展開は不要です。
+リポジトリ全体のZIP（Code → Download ZIP）は過去の全パッチが含まれ肥大化するため使用しません。
+
+1. 会社PCのブラウザで GitHub の `myao_app_patch` リポジトリの **Releases 画面** を開きます。
+2. 最新のリリース（`Latest`）の **Assets** にある **`myao_app_patch_*.zip`** をクリックしてダウンロードします（今回分の差分のみのため数KB〜数MBと軽量です）。
+3. ダウンロードしたZIPを、会社の `%USERPROFILE%\Downloads` へ置きます。展開は不要です。
 
 ### 2. ZIPを検証する
 

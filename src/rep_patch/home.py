@@ -7,7 +7,7 @@
 - delete_repository: 登録済みリポジトリを設定から削除
 - update_repository: リポジトリのブランチや初期導入地点、有効無効状態を更新
 - scan_repositories: 登録済みリポジトリの未公開コミット数やクリーン状態を取得
-- publish: 登録済みで有効なリポジトリの差分パッチ作成・新規ファイル実体同梱・削除記録・署名・分割し、パッチリポジトリへpush
+- publish: 登録済みで有効なリポジトリの差分パッチ作成・新規ファイル実体同梱・削除記録・署名・分割し、パッチリポジトリへpush、今回分軽量ZIPの生成およびGitHub Releases自動公開
 - reset_repository_patches: 指定リポジトリのパッチ専用リポジトリ内パッケージ削除・インデックス再署名・pushおよび公開済みコミットの初期化
 """
 from __future__ import annotations
@@ -22,6 +22,7 @@ from typing import Any
 
 from .config import PROJECT_ROOT, RepositoryConfig, Settings, SettingsStore
 from .errors import RepPatchError
+from .github import create_github_release, get_repo_slug, upload_release_asset
 from .git import (
     changed_paths,
     diff_file_status,
@@ -32,7 +33,7 @@ from .git import (
     run_git,
     tracked_files,
 )
-from .packages import SCHEMA_VERSION, load_index, split_patch, write_json
+from .packages import SCHEMA_VERSION, create_release_bundle, load_index, split_patch, write_json
 from .security import sha256_bytes, sign_document
 
 
@@ -331,10 +332,59 @@ def publish(settings: Settings, store: SettingsStore) -> dict[str, Any]:
     run_git(patch_root, ["commit", "-m", f"Publish patch package {label}"])
     run_git(patch_root, ["push"])
     _reconcile_published(settings, store, signed_index, patch_root)
+
+    # 配布用軽量ZIPの生成（今回作成されたパッチのみ同梱）
+    output_dir = Path(settings.download_dir).expanduser() if settings.download_dir else patch_root / "dist"
+    bundle_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    bundle_name = f"myao_app_patch_{bundle_timestamp}.zip"
+    bundle_path = create_release_bundle(
+        patch_root=patch_root,
+        created_manifests=created,
+        password=settings.patch_password,
+        output_dir=output_dir,
+        bundle_name=bundle_name,
+    )
+
+    # GitHub Releases への自動公開（トークン設定時）
+    release_url = ""
+    download_url = ""
+    release_error = ""
+    if settings.github_token:
+        try:
+            repo_slug = get_repo_slug(patch_root, settings.github_repo)
+            tag_name = f"v{datetime.now(timezone.utc).strftime('%Y.%m.%d-%H%M%S')}"
+            rel_name = f"Patch Release {label}"
+            body_lines = [f"- **{m.get('display_name', m['repo_id'])}**: #{m['sequence']:06d}" for m in created]
+            rel_body = "Myao Patch Bridge 自動パッチ公開\n\n" + "\n".join(body_lines)
+            release_data = create_github_release(
+                token=settings.github_token,
+                repo_slug=repo_slug,
+                tag_name=tag_name,
+                name=rel_name,
+                body=rel_body,
+            )
+            release_url = release_data.get("html_url", "")
+            upload_url = release_data.get("upload_url", "")
+            if upload_url:
+                asset_data = upload_release_asset(
+                    token=settings.github_token,
+                    upload_url=upload_url,
+                    file_path=bundle_path,
+                )
+                download_url = asset_data.get("browser_download_url", "")
+        except Exception as exc:
+            release_error = str(exc)
+
     return {
         "published": True,
         "message": f"{len(created)}件のパッチを公開しました",
         "packages": created,
+        "bundle_path": str(bundle_path),
+        "bundle_name": bundle_path.name,
+        "bundle_size": bundle_path.stat().st_size,
+        "release_url": release_url,
+        "download_url": download_url,
+        "release_error": release_error,
     }
 
 

@@ -19,6 +19,12 @@ myao_app_patch-main/
 
 GitHubのソースZIPによる最上位フォルダ名は任意です。ZIP内で `package-index.json` が1つだけ見つかることを条件にします。
 
+### 配布用軽量ZIP（GitHub Releases アセット）
+リポジトリ全体ではなく、**今回公開されたパッチのみ** を収めた配布用ZIPアーカイブです。
+過去の全パッチディレクトリ（`packages/...`）を除外し、今回作成された連番フォルダと、そのパッチのみを登録してHMAC署名した `package-index.json` のみで構成されます。
+これにより、会社側でのダウンロードサイズを常に最小化（数KB〜数MB）しつつ、会社側アプリ（`PatchArchive`）での検証・適用互換性を100%維持します。
+ファイル名形式: `myao_app_patch_YYYYMMDD_HHMMSS.zip`
+
 Patch Appはパッチ専用リポジトリの `.gitattributes` に `*.patch.part-* binary` を追加し、Gitの改行変換やフィルターで分割バイト列が変わらないようにします。
 
 ## package-index.json

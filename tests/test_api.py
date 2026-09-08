@@ -34,6 +34,30 @@ def test_api_requires_session_token_for_mutation(tmp_path) -> None:
     assert response.status_code == 200
     assert response.json()["mode"] == "home"
 
+    # github_token の設定・マスク・保持の検証
+    res_update = client.put(
+        "/api/settings",
+        json={"values": {"github_token": "ghp_secret_12345", "github_repo": "user/repo"}},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res_update.status_code == 200
+    assert res_update.json()["github_token"] == "********"
+    assert res_update.json()["github_token_configured"] is True
+    assert res_update.json()["github_repo"] == "user/repo"
+
+    # 実設定ファイルには平文で保存されていること
+    assert store.load().github_token == "ghp_secret_12345"
+
+    # ******** で更新しても元のトークンが維持されること
+    res_keep = client.put(
+        "/api/settings",
+        json={"values": {"github_token": "********", "chunk_size_mib": 25}},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res_keep.status_code == 200
+    assert store.load().github_token == "ghp_secret_12345"
+    assert store.load().chunk_size_mib == 25
+
 
 def test_pwa_is_served_with_local_only_security_headers(tmp_path) -> None:
     client = TestClient(create_app(SettingsStore(tmp_path / "settings.local.json")))

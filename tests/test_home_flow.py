@@ -4,6 +4,7 @@
 仕様:
 - test_publish_creates_package_pushes_and_advances_cursor: 差分パッチ作成・新規ファイル実体同梱・削除記録・署名・push・カーソル進行の検証
 - test_reset_repository_patches_clears_packages_and_resets_sequence: パッチ履歴リセットによりパッチ専用リポジトリの該当パッケージ削除・インデックス再署名・push・次回000001再生成の検証
+- test_publish_creates_release_bundle_and_uploads_to_github: 今回分軽量ZIP生成およびGitHub Releases自動公開の検証
 """
 from __future__ import annotations
 
@@ -192,6 +193,89 @@ def test_reset_repository_patches_clears_packages_and_resets_sequence(
     assert manifest["sequence"] == 1
     assert manifest["source_from_commit"] == baseline
     assert manifest["source_to_commit"] == fresh_target
+
+
+def test_publish_creates_release_bundle_and_uploads_to_github(
+    tmp_path: Path, git_helpers, monkeypatch
+) -> None:
+    git, init_repo = git_helpers
+    source = init_repo(tmp_path / "source" / "sample-app")
+    git(source, "branch", "-M", "main")
+    (source / "app.txt").write_text("v1\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "v1")
+    baseline = git(source, "rev-parse", "HEAD").decode().strip()
+
+    (source / "app.txt").write_text("v2\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "v2")
+    target = git(source, "rev-parse", "HEAD").decode().strip()
+
+    remote = tmp_path / "patch-remote.git"
+    remote.mkdir()
+    git(remote, "init", "--bare")
+    patch_repo = init_repo(tmp_path / "myao_app_patch")
+    git(patch_repo, "branch", "-M", "main")
+    (patch_repo / "README.md").write_text("patches\n", encoding="utf-8")
+    git(patch_repo, "add", "-A")
+    git(patch_repo, "commit", "-m", "initial")
+    git(patch_repo, "remote", "add", "origin", "https://github.com/myao9494/myao_app_patch.git")
+    # upstream 用に push 先をローカル bare remote に向けるため remote set-url または別リモート
+    git(patch_repo, "remote", "set-url", "--push", "origin", str(remote))
+    git(patch_repo, "push", "-u", "origin", "main")
+
+    settings_path = tmp_path / "data" / "settings.local.json"
+    store = SettingsStore(settings_path)
+    download_dir = tmp_path / "downloads"
+    download_dir.mkdir()
+    settings = Settings(
+        mode="home",
+        patch_repo=str(patch_repo),
+        patch_password="test-password",
+        download_dir=str(download_dir),
+        github_token="fake-github-token",
+        github_repo="myao9494/myao_app_patch",
+        repositories={
+            "sample-app": RepositoryConfig(
+                repo_id="sample-app",
+                display_name="sample-app",
+                path=str(source),
+                branch="main",
+                baseline_commit=baseline,
+            )
+        },
+    )
+    store.save(settings)
+
+    # GitHub API のモック
+    from unittest.mock import MagicMock
+    mock_release = {
+        "id": 999,
+        "html_url": "https://github.com/myao9494/myao_app_patch/releases/tag/v2026.09.09-01",
+        "upload_url": "https://uploads.github.com/repos/myao9494/myao_app_patch/releases/999/assets{?name,label}",
+    }
+    mock_asset = {
+        "id": 888,
+        "browser_download_url": "https://github.com/myao9494/myao_app_patch/releases/download/v2026.09.09-01/myao_app_patch_test.zip",
+    }
+
+    import rep_patch.home as home_module
+    create_rel_mock = MagicMock(return_value=mock_release)
+    upload_asset_mock = MagicMock(return_value=mock_asset)
+    monkeypatch.setattr(home_module, "create_github_release", create_rel_mock)
+    monkeypatch.setattr(home_module, "upload_release_asset", upload_asset_mock)
+
+    result = publish(settings, store)
+    assert result["published"] is True
+    assert "bundle_path" in result
+    assert Path(result["bundle_path"]).exists()
+    assert result["bundle_name"].startswith("myao_app_patch_")
+    assert result["bundle_size"] > 0
+    assert result.get("release_url") == mock_release["html_url"]
+    assert result.get("download_url") == mock_asset["browser_download_url"]
+
+    assert create_rel_mock.called
+    assert upload_asset_mock.called
 
 
 

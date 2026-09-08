@@ -5,9 +5,11 @@
 - SCHEMA_VERSION: パッケージ仕様バージョン
 - split_patch: 指定サイズごとのバイナリパッチ分割処理
 - PatchArchive: パッチZIPの安全な検証・展開・再構築および追加ファイル読み込み
+- create_release_bundle: 今回公開されたパッチのみを含む配布用軽量ZIPアーカイブの生成
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -284,4 +286,62 @@ class PatchArchive:
                 for repo_id, packages in groups.items()
             ],
         }
+
+
+def create_release_bundle(
+    patch_root: Path,
+    created_manifests: list[dict[str, Any]],
+    password: str,
+    output_dir: Path,
+    bundle_name: str | None = None,
+) -> Path:
+    """今回作成されたマニフェストのみを含む軽量な配布用ZIPアーカイブを生成する"""
+    if not created_manifests:
+        raise PackageValidationError("公開対象のマニフェストがありません")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if not bundle_name:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        bundle_name = f"myao_app_patch_{timestamp}.zip"
+    zip_path = output_dir / bundle_name
+
+    packages_entry = []
+    for manifest in created_manifests:
+        repo_id = str(manifest["repo_id"])
+        seq = int(manifest["sequence"])
+        manifest_rel = f"packages/{repo_id}/{seq:06d}/manifest.json"
+        packages_entry.append(
+            {
+                "repo_id": repo_id,
+                "sequence": seq,
+                "manifest_path": manifest_rel,
+            }
+        )
+
+    bundle_index = sign_document(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "package_type": PACKAGE_TYPE,
+            "packages": packages_entry,
+        },
+        password,
+    )
+
+    temp_zip = zip_path.with_suffix(zip_path.suffix + ".tmp")
+    with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        index_bytes = (json.dumps(bundle_index, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        zf.writestr("package-index.json", index_bytes)
+
+        for manifest in created_manifests:
+            repo_id = str(manifest["repo_id"])
+            seq = int(manifest["sequence"])
+            target_dir = patch_root / "packages" / repo_id / f"{seq:06d}"
+            if not target_dir.exists():
+                raise PackageValidationError(f"パッチディレクトリが存在しません: {target_dir}")
+            for item in sorted(target_dir.rglob("*")):
+                if item.is_file():
+                    arcname = f"packages/{repo_id}/{seq:06d}/{item.relative_to(target_dir).as_posix()}"
+                    zf.write(item, arcname)
+
+    temp_zip.replace(zip_path)
+    return zip_path
 

@@ -3,7 +3,7 @@
 
 仕様:
 - RepositoryConfig: 単一リポジトリの設定（repo_id, display_name, path, kind, enabled, branch, baseline_commit, published_commit）
-- Settings: アプリケーション全体設定（mode, 各種ルートパス, パスワード, 待受ポート, 分割サイズ, repositories, company_excluded_repo_ids）
+- Settings: アプリケーション全体設定（mode, 各種ルートパス, パスワード, 待受ポート, 分割サイズ, repositories, company_excluded_repo_ids, github_token, github_repo）
 - SettingsStore: 設定のローカルJSON永続化（data/settings.local.json）およびバリデーション
 """
 from __future__ import annotations
@@ -54,6 +54,8 @@ class Settings:
     chunk_size_mib: int = 20
     company_repo_paths: dict[str, str] = field(default_factory=dict)
     company_excluded_repo_ids: list[str] = field(default_factory=list)
+    github_token: str = ""
+    github_repo: str = ""
     repositories: dict[str, RepositoryConfig] = field(default_factory=dict)
 
     @classmethod
@@ -71,6 +73,8 @@ class Settings:
         value = asdict(self)
         value["patch_password"] = "" if not self.patch_password else "********"
         value["password_configured"] = bool(self.patch_password)
+        value["github_token"] = "" if not self.github_token else "********"
+        value["github_token_configured"] = bool(self.github_token)
         return value
 
 
@@ -106,6 +110,9 @@ class SettingsStore:
         if updates.get("patch_password") == "********":
             updates = dict(updates)
             updates.pop("patch_password")
+        if updates.get("github_token") == "********":
+            updates = dict(updates)
+            updates.pop("github_token")
         raw.update(updates)
         updated = Settings.from_dict(raw)
         if updated.mode not in {"home", "company"}:

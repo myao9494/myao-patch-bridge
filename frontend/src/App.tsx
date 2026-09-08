@@ -7,7 +7,7 @@
  *   - リポジトリカードの手動追加（パス指定・ブランチ・種類・初期導入地点）
  *   - リポジトリカードの削除（管理対象からの除外）
  *   - リポジトリの有効/無効トグル（パッチ公開対象の選択）
- *   - リポジトリ設定の保存および未公開パッチの作成・公開
+ *   - リポジトリ設定の保存および未公開パッチの作成・公開（今回分軽量ZIP生成・GitHub Releases自動公開対応）
  *   - リポジトリのパッチ履歴リセット（000001からの再作成・リモートパッチ削除・初期導入地点更新オプション）
  * - 会社モード（CompanyDashboard）:
  *   - ダウンロード済みパッチZIPの検索・選択・署名検証
@@ -54,6 +54,7 @@ import type {
   DownloadPackage,
   OperationResult,
   PackageSummary,
+  PublishResult,
   Repository,
   RepositoryCreatePayload,
   ResetResult,
@@ -70,6 +71,9 @@ const emptySettings: Settings = {
   download_dir: "",
   patch_password: "",
   password_configured: false,
+  github_token: "",
+  github_token_configured: false,
+  github_repo: "",
   listen_host: "127.0.0.1",
   listen_port: 17345,
   chunk_size_mib: 20,
@@ -302,10 +306,20 @@ export default function App() {
   const publish = async () => {
     if (!confirm("変更パッチを作成し、パッチ専用リポジトリへpushしますか？")) return;
     const value = await perform("パッチを作成・公開中", () =>
-      api<{ published: boolean; message: string }>("/api/home/publish", { method: "POST" })
+      api<PublishResult>("/api/home/publish", { method: "POST" })
     );
     if (value) {
-      setNotice(value.message);
+      let msg = value.message;
+      if (value.release_url) {
+        msg += `\nGitHub Releasesへ公開しました: ${value.release_url}`;
+      } else if (value.release_error) {
+        msg += `\n(GitHub Releases公開警告: ${value.release_error})`;
+      }
+      if (value.bundle_name && value.bundle_size) {
+        const sizeKb = Math.round(value.bundle_size / 1024);
+        msg += `\n今回分ZIP: ${value.bundle_name} (${sizeKb} KB)`;
+      }
+      setNotice(msg);
       await loadRepositories();
     }
   };
@@ -1091,6 +1105,8 @@ function SettingsDrawer(props: { settings: Settings; setSettings: (value: Settin
         <Field label="アプリルート" value={s.apps_root} onChange={(apps_root) => patch({apps_root})}/>
         <Field label="Obsidian設定リポジトリ" value={s.obsidian_repo} onChange={(obsidian_repo) => patch({obsidian_repo})}/>
         <Field label="パッチ専用リポジトリ" value={s.patch_repo} onChange={(patch_repo) => patch({patch_repo})}/>
+        <Field label="GitHub トークン (Releases自動公開用)" type="password" placeholder={s.github_token_configured ? "設定済み（変更時のみ入力）" : "ghp_... (任意)"} value={s.github_token || ""} onChange={(github_token) => patch({github_token})}/>
+        <Field label="GitHub リポジトリ名 (owner/repo)" placeholder="未入力時はoriginから自動取得" value={s.github_repo || ""} onChange={(github_repo) => patch({github_repo})}/>
       </> : <>
         <Field label="会社側アプリルート" value={s.company_apps_root} onChange={(company_apps_root) => patch({company_apps_root})}/>
         <Field label="会社側Obsidian設定" value={s.company_obsidian_repo} onChange={(company_obsidian_repo) => patch({company_obsidian_repo})}/>
