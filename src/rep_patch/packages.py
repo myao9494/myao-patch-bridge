@@ -300,7 +300,7 @@ def create_release_bundle(
         raise PackageValidationError("公開対象のマニフェストがありません")
     output_dir.mkdir(parents=True, exist_ok=True)
     if not bundle_name:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         bundle_name = f"myao_app_patch_{timestamp}.zip"
     zip_path = output_dir / bundle_name
 

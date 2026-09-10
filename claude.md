@@ -34,9 +34,10 @@
   - 選択・有効化されたリポジトリの未公開コミット差分をバイナリパッチ（20MiB分割可）として生成
   - **差分ファイル実体同梱**: 新規追加および変更されたファイルの実体を `added_files/` へ自動保存しハッシュ署名
   - **削除ファイル記録**: 削除されたファイルを `deleted_files` としてマニフェストへ記録
-  - 署名付き `manifest.json` および `package-index.json` をパッチ専用リポジトリへコミット＆push
-  - **今回分軽量ZIP生成**: 公開完了時に、今回作成されたパッチのみを収めた軽量配布用ZIP（`myao_app_patch_YYYYMMDD_HHMMSS.zip`）を自動生成
-  - **GitHub Releases 自動公開**: 設定された GitHub トークン（PAT）を用いて、GitHub Releases へ新規リリースを作成し、今回分軽量ZIPをアセットとして自動アップロード
+  - **リポジトリ軽量化（最新パッチのみ保持）**: パッチ公開時、パッチ専用リポジトリのワーキングツリーから古いパッチディレクトリを自動クリーンアップし、**今回作成された最新パッチおよび今回分のみの署名付き `package-index.json` のみ** をコミット＆push（GitHubの「Code → Download ZIP」のサイズを常に数KB〜数MBに最小化）
+  - **連番の確実な継続**: 自宅側のローカル設定（`RepositoryConfig.last_sequence`）で最新連番を記録・保持し、過去パッチ削除後も次回連番を安全にインクリメント
+  - **今回分軽量ZIP生成**: 公開完了時に、今回作成されたパッチのみを収めた配布用ZIP（`myao_app_patch_YYYYMMDD_HHMMSS_ffffff.zip`）も自動生成
+  - **GitHub Releases 自動公開**: 設定された GitHub トークン（PAT）を用いて、GitHub Releases へ新規リリースを作成し、今回分軽量ZIPをアセットとして自動アップロード（Releases利用環境向け）
 - **開発起動**: `uv run patch-bridge` / `frontend` で `npm run build`
 
 ### 会社モード (`company`)
@@ -45,8 +46,8 @@
 - **リポジトリ管理・カード削除**:
   - 管理対象外のリポジトリカードを削除（`DELETE /api/company/repositories/{repo_id}`）※実リポジトリは保持、設定画面から除外解除可能
 - **パッチ受信・検証**:
-  - GitHub の Releases 画面（`Latest`）から今回分軽量ZIP（`myao_app_patch_*.zip`）を直接ダウンロードして `Downloads` へ配置
-  - `Downloads` フォルダ内の `myao_app_patch*.zip` を検索・検証（署名・SHA-256・追加ファイル・リポジトリ対応状況の一致確認）。過去パッチを含まない今回分ZIPでも完全互換で自動検証・適用。
+  - GitHub リポジトリトップの「Code → Download ZIP」（`myao_app_patch-main.zip`）、または Releases 画面から今回分ZIPをダウンロードして `Downloads` へ配置
+  - `Downloads` フォルダ内の `myao_app_patch*.zip` を検索・検証（署名・SHA-256・追加ファイル・リポジトリ対応状況の一致確認）。過去パッチを含まない最新パッチZIPでも完全互換で自動検証・適用。
 - **パッチ適用・コミット**:
   - **自動事前コミット**: パッチ適用開始時に手動変更等の未コミット変更が存在する場合、自動的に `[myao-patch] アプリ名 update` としてコミットし、作業ツリーをクリーンにしてから適用を開始
   - **ファイル直接上書き配置・削除**: `git apply`（差分パッチ）や全ファイル完全一致チェックを使用せず、同梱された差分ファイル実体（`added_files/` 内の変更・新規ファイル）を直接上書き配置し、削除対象ファイルを確実に消去（会社側独自ファイルや改行コード差分と安全に共存）

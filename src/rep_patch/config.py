@@ -2,7 +2,7 @@
 アプリケーション設定およびリポジトリ設定の定義・永続化モジュール
 
 仕様:
-- RepositoryConfig: 単一リポジトリの設定（repo_id, display_name, path, kind, enabled, branch, baseline_commit, published_commit）
+- RepositoryConfig: 単一リポジトリの設定（repo_id, display_name, path, kind, enabled, branch, baseline_commit, published_commit, last_sequence）
 - Settings: アプリケーション全体設定（mode, 各種ルートパス, パスワード, 待受ポート, 分割サイズ, repositories, company_excluded_repo_ids, github_token, github_repo）
 - SettingsStore: 設定のローカルJSON永続化（data/settings.local.json）およびバリデーション
 """
@@ -32,6 +32,7 @@ class RepositoryConfig:
     branch: str = "main"
     baseline_commit: str = ""
     published_commit: str = ""
+    last_sequence: int = 0
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> RepositoryConfig:

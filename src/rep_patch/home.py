@@ -7,8 +7,8 @@
 - delete_repository: 登録済みリポジトリを設定から削除
 - update_repository: リポジトリのブランチや初期導入地点、有効無効状態を更新
 - scan_repositories: 登録済みリポジトリの未公開コミット数やクリーン状態を取得
-- publish: 登録済みで有効なリポジトリの差分パッチ作成・新規ファイル実体同梱・削除記録・署名・分割し、パッチリポジトリへpush、今回分軽量ZIPの生成およびGitHub Releases自動公開
-- reset_repository_patches: 指定リポジトリのパッチ専用リポジトリ内パッケージ削除・インデックス再署名・pushおよび公開済みコミットの初期化
+- publish: 登録済みで有効なリポジトリの差分パッチ作成・新規ファイル実体同梱・削除記録・署名・分割、過去パッチ自動クリーンアップ（リポジトリ軽量化）、パッチリポジトリへpush、今回分軽量ZIPの生成およびGitHub Releases自動公開
+- reset_repository_patches: 指定リポジトリのパッチ専用リポジトリ内パッケージ削除・インデックス再署名・pushおよび公開済みコミット・連番の初期化
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ from .git import (
     run_git,
     tracked_files,
 )
-from .packages import SCHEMA_VERSION, create_release_bundle, load_index, split_patch, write_json
+from .packages import PACKAGE_TYPE, SCHEMA_VERSION, create_release_bundle, load_index, split_patch, write_json
 from .security import sha256_bytes, sign_document
 
 
@@ -229,6 +229,8 @@ def publish(settings: Settings, store: SettingsStore) -> dict[str, Any]:
     index = load_index(index_path, settings.patch_password)
     _reconcile_published(settings, store, index, patch_root)
     latest_sequence: dict[str, int] = {}
+    for repo_id, cfg in settings.repositories.items():
+        latest_sequence[repo_id] = cfg.last_sequence
     for item in index["packages"]:
         repo_id = item["repo_id"]
         latest_sequence[repo_id] = max(latest_sequence.get(repo_id, 0), int(item["sequence"]))
@@ -324,18 +326,57 @@ def publish(settings: Settings, store: SettingsStore) -> dict[str, Any]:
 
     if not created:
         return {"published": False, "message": "公開する変更はありません", "packages": []}
-    unsigned_index = {key: value for key, value in index.items() if key != "signature"}
-    signed_index = sign_document(unsigned_index, settings.patch_password)
+
+    # ワーキングツリーの軽量化: 今回作成されたパッチ以外の過去ディレクトリを削除
+    packages_dir = patch_root / "packages"
+    keep_dirs = {packages_dir / m["repo_id"] / f"{m['sequence']:06d}" for m in created}
+    if packages_dir.exists():
+        for repo_dir in packages_dir.iterdir():
+            if not repo_dir.is_dir():
+                continue
+            for seq_dir in list(repo_dir.iterdir()):
+                if seq_dir.is_dir() and seq_dir not in keep_dirs:
+                    shutil.rmtree(seq_dir)
+            if not any(repo_dir.iterdir()):
+                repo_dir.rmdir()
+
+    # package-index.json を今回作成されたパッチのみで再構築
+    new_packages_entry = []
+    for manifest in created:
+        manifest_rel = f"packages/{manifest['repo_id']}/{manifest['sequence']:06d}/manifest.json"
+        new_packages_entry.append(
+            {
+                "repo_id": manifest["repo_id"],
+                "sequence": manifest["sequence"],
+                "manifest_path": manifest_rel,
+            }
+        )
+    signed_index = sign_document(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "package_type": PACKAGE_TYPE,
+            "packages": new_packages_entry,
+        },
+        settings.patch_password,
+    )
     write_json(index_path, signed_index)
-    run_git(patch_root, ["add", "--", ".gitattributes", "package-index.json", "packages"])
+
+    run_git(patch_root, ["add", "-A"])
     label = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     run_git(patch_root, ["commit", "-m", f"Publish patch package {label}"])
     run_git(patch_root, ["push"])
-    _reconcile_published(settings, store, signed_index, patch_root)
+
+    # 自宅側設定の published_commit および last_sequence を更新・保存
+    for manifest in created:
+        repo_id = manifest["repo_id"]
+        if repo_id in settings.repositories:
+            settings.repositories[repo_id].published_commit = manifest["source_to_commit"]
+            settings.repositories[repo_id].last_sequence = int(manifest["sequence"])
+    store.save(settings)
 
     # 配布用軽量ZIPの生成（今回作成されたパッチのみ同梱）
     output_dir = Path(settings.download_dir).expanduser() if settings.download_dir else patch_root / "dist"
-    bundle_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    bundle_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     bundle_name = f"myao_app_patch_{bundle_timestamp}.zip"
     bundle_path = create_release_bundle(
         patch_root=patch_root,
@@ -430,8 +471,9 @@ def reset_repository_patches(
     else:
         _push_pending(patch_root)
 
-    # 4. 自宅側設定の更新（published_commit のクリア、および任意で baseline_commit の更新）
+    # 4. 自宅側設定の更新（published_commit のクリア、last_sequenceの初期化、および任意で baseline_commit の更新）
     config.published_commit = ""
+    config.last_sequence = 0
     if new_baseline_commit:
         config.baseline_commit = resolve_commit(Path(config.path), new_baseline_commit)
     settings.repositories[repo_id] = config

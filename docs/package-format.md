@@ -17,13 +17,14 @@ myao_app_patch-main/
     └── obsidian-settings/
 ```
 
-GitHubのソースZIPによる最上位フォルダ名は任意です。ZIP内で `package-index.json` が1つだけ見つかることを条件にします。
+### リポジトリの自動軽量化仕様
+パッチ専用リポジトリのワーキングツリー（最新コミット）には、**今回公開された最新パッチディレクトリのみ** が保持されます。
+過去のパッチディレクトリは自動的に削除（Gitコミット履歴には保持）され、`package-index.json` も今回分のみで再署名されます。
+これにより、GitHubの「Code → Download ZIP」（`myao_app_patch-main.zip`）でダウンロードされるZIPサイズが常に今回分だけの最小サイズ（数KB〜数MB）に保たれます。
 
-### 配布用軽量ZIP（GitHub Releases アセット）
-リポジトリ全体ではなく、**今回公開されたパッチのみ** を収めた配布用ZIPアーカイブです。
-過去の全パッチディレクトリ（`packages/...`）を除外し、今回作成された連番フォルダと、そのパッチのみを登録してHMAC署名した `package-index.json` のみで構成されます。
-これにより、会社側でのダウンロードサイズを常に最小化（数KB〜数MB）しつつ、会社側アプリ（`PatchArchive`）での検証・適用互換性を100%維持します。
-ファイル名形式: `myao_app_patch_YYYYMMDD_HHMMSS.zip`
+### 配布用軽量ZIP（ローカル生成 / GitHub Releases アセット）
+パッチ公開時にダウンロードフォルダへ直接出力される単一ZIP（`myao_app_patch_YYYYMMDD_HHMMSS_ffffff.zip`）です。
+リポジトリの「Download ZIP」と同様に、今回作成された連番フォルダと今回分の `package-index.json` のみで構成されます。
 
 Patch Appはパッチ専用リポジトリの `.gitattributes` に `*.patch.part-* binary` を追加し、Gitの改行変換やフィルターで分割バイト列が変わらないようにします。
 
