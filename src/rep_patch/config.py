@@ -4,13 +4,15 @@
 仕様:
 - RepositoryConfig: 単一リポジトリの設定（repo_id, display_name, path, kind, enabled, branch, baseline_commit, published_commit, last_sequence）
 - Settings: アプリケーション全体設定（mode, 各種ルートパス, パスワード, 待受ポート, 分割サイズ, repositories, company_excluded_repo_ids, github_token, github_repo）
-- SettingsStore: 設定のローカルJSON永続化（data/settings.local.json）およびバリデーション
+- SettingsStore: 設定のローカルJSON永続化（data/settings.local.json）、待受ホスト等のバリデーション、および引数オーバーライド
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import platform
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,22 @@ from .errors import RepPatchError
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 SETTINGS_PATH = DATA_DIR / "settings.local.json"
+
+_HOSTNAME_REGEX = re.compile(
+    r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
+)
+
+
+def is_valid_host(host: str) -> bool:
+    """ホストが有効なIPアドレスまたはホスト名/FQDNであるかを判定する"""
+    if not host or len(host) > 253:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    return bool(_HOSTNAME_REGEX.match(host))
 
 
 @dataclass
@@ -80,16 +98,23 @@ class Settings:
 
 
 class SettingsStore:
-    def __init__(self, path: Path = SETTINGS_PATH):
+    def __init__(self, path: Path = SETTINGS_PATH, overrides: dict[str, Any] | None = None):
         self.path = path
+        self.overrides = dict(overrides or {})
 
     def load(self) -> Settings:
         if not self.path.exists():
-            return Settings()
-        try:
-            return Settings.from_dict(json.loads(self.path.read_text(encoding="utf-8")))
-        except (OSError, ValueError, TypeError) as exc:
-            raise RepPatchError(f"設定ファイルを読み込めません: {exc}") from exc
+            base = Settings()
+        else:
+            try:
+                base = Settings.from_dict(json.loads(self.path.read_text(encoding="utf-8")))
+            except (OSError, ValueError, TypeError) as exc:
+                raise RepPatchError(f"設定ファイルを読み込めません: {exc}") from exc
+        if self.overrides:
+            for key, value in self.overrides.items():
+                if hasattr(base, key) and value is not None:
+                    setattr(base, key, value)
+        return base
 
     def save(self, settings: Settings) -> Settings:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,8 +143,8 @@ class SettingsStore:
         updated = Settings.from_dict(raw)
         if updated.mode not in {"home", "company"}:
             raise RepPatchError("mode は home または company で指定してください")
-        if updated.listen_host != "127.0.0.1":
-            raise RepPatchError("セキュリティのため待受ホストは 127.0.0.1 のみ使用できます")
+        if not is_valid_host(updated.listen_host):
+            raise RepPatchError("待受ホストは有効なIPアドレス（127.0.0.1、0.0.0.0 など）またはホスト名を指定してください")
         if not 1 <= updated.listen_port <= 65535:
             raise RepPatchError("ポート番号が不正です")
         if not 1 <= updated.chunk_size_mib <= 40:

@@ -2,7 +2,7 @@
 Myao Patch Bridge のローカル REST API サーバー
 
 仕様:
-- ローカル限定アクセス（127.0.0.1）およびCSRF保護用セッショントークン検証
+- ローカルおよびVPN/プライベートネットワーク限定アクセス、およびCSRF保護用セッショントークン検証
 - 設定管理（GET/PUT /api/settings）
 - リポジトリ管理（GET /api/repositories, POST /api/repositories, PUT /api/repositories/{repo_id}, DELETE /api/repositories/{repo_id}, POST /api/repositories/{repo_id}/reset, POST /api/repositories/discover）
 - 自宅パッチ公開（POST /api/home/publish）
@@ -47,6 +47,7 @@ from .home import (
     scan_repositories,
     update_repository,
 )
+from .security import is_allowed_client_ip
 
 
 class SettingsUpdate(BaseModel):
@@ -132,8 +133,13 @@ def create_app(store: SettingsStore | None = None) -> FastAPI:
     @app.middleware("http")
     async def local_security(request: Request, call_next):  # type: ignore[no-untyped-def]
         client_host = request.client.host if request.client else ""
-        if client_host not in {"127.0.0.1", "::1", "testclient"}:
-            return JSONResponse({"detail": "localhostからのみ利用できます"}, status_code=403)
+        settings = settings_store.load()
+        allow_vpn = settings.listen_host not in {"127.0.0.1", "localhost", "::1"}
+        if not is_allowed_client_ip(client_host, allow_vpn=allow_vpn):
+            return JSONResponse(
+                {"detail": "localhostまたは許可されたVPN/プライベートネットワークからのみ利用できます"},
+                status_code=403,
+            )
         if (
             request.url.path.startswith("/api/")
             and request.method not in {"GET", "HEAD", "OPTIONS"}

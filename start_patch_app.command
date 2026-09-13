@@ -20,4 +20,4 @@ if [ -n "$PIDS" ]; then
   if [ -n "$PIDS" ]; then kill -9 $PIDS 2>/dev/null || true; fi
 fi
 
-PYTHONPATH="$(pwd)/src" exec .venv/bin/python -m rep_patch
+PYTHONPATH="$(pwd)/src" exec .venv/bin/python -m rep_patch "$@"

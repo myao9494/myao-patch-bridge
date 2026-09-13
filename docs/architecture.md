@@ -81,14 +81,16 @@ stateDiagram-v2
 
 全アプリ適用はリポジトリ単位の独立トランザクションです。1つが失敗しても、そのアプリだけ復元し、他のアプリは続行します。`git apply` を使わずファイル実体を直接上書き配置・削除するため、パッチ形式や改行コード差分による適用失敗を回避します。
 
-## React PWA
+## React PWA / ネットワーク待受
 
 - Reactのビルド成果物をPython APIと同梱
-- `127.0.0.1:17345` の固定オリジン
-- Edgeからインストール可能
+- 既定は `127.0.0.1:17345` のローカル固定オリジン
+- 設定ドロワーまたは起動引数（`--allow-vpn` / `--host 0.0.0.0`）により、VPN（Tailscale等）やプライベートLANからの待受に対応
+- Edge/Chrome等のブラウザからPWAとしてインストール可能
 - Service Workerは静的UIだけをキャッシュ
 - API、パス、ZIP、ログはキャッシュしない
 - PWAを開く前にPythonバックエンドを起動する必要がある
+- ネットワーク境界フローの詳細は [network-access-flow.excalidraw](file:///Users/mine/000_work/app/myao-patch-bridge/docs/network-access-flow.excalidraw) を参照
 
 ## エディタ連携
 

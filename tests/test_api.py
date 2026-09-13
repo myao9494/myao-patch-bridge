@@ -10,6 +10,10 @@ APIエンドポイントおよびPWA配信セキュリティのテスト
 - test_api_open_antigravity: Antigravity起動APIの検証（正常系・異常系・Antigravity未検出）
 - test_company_api_delete_repository: 会社側リポジトリカードの削除（除外）APIおよび一覧からの非表示、実ディレクトリ保持の検証
 - test_home_api_reset_repository: 自宅側リポジトリパッチ履歴リセットAPI（POST /api/repositories/{repo_id}/reset）の検証
+- test_api_listen_host_update: 待受ホスト（listen_host）の更新とバリデーション検証
+- test_api_vpn_access_permission: listen_hostに応じたVPN/プライベートIPおよびパブリックIPのアクセス制御検証
+- test_settings_store_overrides: SettingsStoreの引数オーバーライドの検証
+- test_detect_tailscale_dns_name: Tailscale MagicDNS検出処理の検証
 """
 from __future__ import annotations
 
@@ -394,6 +398,97 @@ def test_home_api_reset_repository(tmp_path, git_helpers) -> None:
     assert data["repo_id"] == "sample-app"
     assert not (patch_repo / "packages" / "sample-app").exists()
     assert store.load().repositories["sample-app"].published_commit == ""
+
+
+def test_api_listen_host_update(tmp_path) -> None:
+    store = SettingsStore(tmp_path / "settings.local.json")
+    client = TestClient(create_app(store))
+    token = client.get("/api/session").json()["token"]
+
+    # 0.0.0.0 やプライベートIPへの更新が成功すること
+    res = client.put(
+        "/api/settings",
+        json={"values": {"listen_host": "0.0.0.0"}},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res.status_code == 200
+    assert res.json()["listen_host"] == "0.0.0.0"
+    assert store.load().listen_host == "0.0.0.0"
+
+    # Tailscale等のFQDN/ホスト名への更新も成功すること
+    res_hostname = client.put(
+        "/api/settings",
+        json={"values": {"listen_host": "mineomacbook-air.taild3cb7c.ts.net"}},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res_hostname.status_code == 200
+    assert res_hostname.json()["listen_host"] == "mineomacbook-air.taild3cb7c.ts.net"
+    assert store.load().listen_host == "mineomacbook-air.taild3cb7c.ts.net"
+
+    # 不正なホスト（スペースや不正文字）は400エラー
+    res_err = client.put(
+        "/api/settings",
+        json={"values": {"listen_host": "invalid host name"}},
+        headers={"X-Rep-Patch-Token": token},
+    )
+    assert res_err.status_code == 400
+
+
+def test_api_vpn_access_permission(tmp_path) -> None:
+    store = SettingsStore(tmp_path / "settings.local.json")
+    app = create_app(store)
+
+    # 1. デフォルト (listen_host="127.0.0.1") の場合
+    # プライベートIP / VPN (192.168.1.50) からのアクセスは403
+    client_vpn = TestClient(app, client=("192.168.1.50", 50000))
+    res_blocked = client_vpn.get("/api/health")
+    assert res_blocked.status_code == 403
+
+    # 2. listen_host="0.0.0.0" の場合
+    store.update({"listen_host": "0.0.0.0"})
+    app_vpn = create_app(store)
+
+    # プライベートIPからのアクセスは200
+    client_vpn_allowed = TestClient(app_vpn, client=("192.168.1.50", 50000))
+    assert client_vpn_allowed.get("/api/health").status_code == 200
+
+    # Tailscale IP (100.64.0.5) からのアクセスも200
+    client_tailscale = TestClient(app_vpn, client=("100.64.0.5", 50000))
+    assert client_tailscale.get("/api/health").status_code == 200
+
+    # パブリックIP (8.8.8.8) からのアクセスは403で遮断
+    client_public = TestClient(app_vpn, client=("8.8.8.8", 50000))
+    assert client_public.get("/api/health").status_code == 403
+
+
+def test_settings_store_overrides(tmp_path) -> None:
+    path = tmp_path / "settings.local.json"
+    store = SettingsStore(path, overrides={"listen_host": "0.0.0.0", "listen_port": 18000})
+    settings = store.load()
+    assert settings.listen_host == "0.0.0.0"
+    assert settings.listen_port == 18000
+
+
+def test_detect_tailscale_dns_name(monkeypatch) -> None:
+    from rep_patch.main import detect_tailscale_dns_name
+
+    # 正常系: status --json で Self.DNSName が取得できる場合
+    dummy_json = '{"Self": {"DNSName": "my-pc.tail12345.ts.net."}}'
+
+    class DummyCompletedProcess:
+        returncode = 0
+        stdout = dummy_json
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/local/bin/tailscale")
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: DummyCompletedProcess())
+    assert detect_tailscale_dns_name() == "my-pc.tail12345.ts.net"
+
+    # 異常系: tailscale コマンドが存在しない場合
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr("pathlib.Path.is_file", lambda _: False)
+    assert detect_tailscale_dns_name() is None
+
+
 
 
 

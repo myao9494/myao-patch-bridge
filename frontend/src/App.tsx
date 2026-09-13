@@ -15,7 +15,7 @@
  *   - リポジトリカードの削除（管理対象からの除外）
  *   - 適用開始番号の指定とstate.json自動生成（個別・一括）
  *   - 会社側環境診断
- * - 共通: 設定ドロワー、PWAインストールプロンプト、通知・エラーバナー、エディタ起動（自宅: Antigravity、会社: VS Code）
+ * - 共通: 設定ドロワー（待受ホスト・VPNアクセス・ポート等の設定変更）、PWAインストールプロンプト、通知・エラーバナー、エディタ起動（自宅: Antigravity、会社: VS Code）
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -536,6 +536,7 @@ export default function App() {
             onDeleteRepo={deleteCompanyRepository}
             onDiagnostics={runChecks}
             onOpenVsCode={openVsCode}
+            listenHost={settings.listen_host}
           />
         )}
       </main>
@@ -960,11 +961,17 @@ function CompanyDashboard(props: {
   onDeleteRepo: (repo: CompanyRepository) => void;
   onDiagnostics: () => void;
   onOpenVsCode: (path: string) => void;
+  listenHost?: string;
 }) {
+  const isRemoteAllowed = props.listenHost && props.listenHost !== "127.0.0.1";
   return <>
     <section className="hero company-hero">
       <div><p className="eyebrow">OFFLINE APPLIER</p><h1>確認してから、<br/>次へ進める。</h1><p>DownloadsのZIPを直接検証し、アプリ単位で安全に適用・復元します。</p></div>
-      <div className="shield"><ShieldCheck size={54}/><span>LOCAL ONLY</span><small>127.0.0.1</small></div>
+      <div className="shield">
+        <ShieldCheck size={54}/>
+        <span>{isRemoteAllowed ? "VPN / LAN" : "LOCAL ONLY"}</span>
+        <small>{props.listenHost || "127.0.0.1"}</small>
+      </div>
     </section>
     <section className="workspace-grid">
       <article className="panel package-panel">
@@ -1144,7 +1151,11 @@ function SettingsDrawer(props: { settings: Settings; setSettings: (value: Settin
         )}
       </>}
       <Field label="パッチ検証パスワード" type="password" placeholder={s.password_configured ? "設定済み（変更時のみ入力）" : "自宅と会社で同じ値"} value={s.patch_password} onChange={(patch_password) => patch({patch_password})}/>
-      <div className="field-row"><Field label="ローカルポート" type="number" value={String(s.listen_port)} onChange={(value) => patch({listen_port:Number(value)})}/><Field label="分割サイズ (MiB)" type="number" value={String(s.chunk_size_mib)} onChange={(value) => patch({chunk_size_mib:Number(value)})}/></div>
+      <div className="field-row">
+        <Field label="待受ホスト (127.0.0.1: ローカルのみ / 0.0.0.0: VPN・LAN許可)" value={s.listen_host} placeholder="127.0.0.1 または 0.0.0.0" onChange={(listen_host) => patch({listen_host})}/>
+        <Field label="ローカルポート" type="number" value={String(s.listen_port)} onChange={(value) => patch({listen_port:Number(value)})}/>
+      </div>
+      <Field label="分割サイズ (MiB)" type="number" value={String(s.chunk_size_mib)} onChange={(value) => patch({chunk_size_mib:Number(value)})}/>
     </div>
     <div className="drawer-footer"><button className="button primary full" onClick={props.onSave}><Save size={17}/>設定を保存</button></div>
   </aside></div>;
