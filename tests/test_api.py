@@ -17,6 +17,7 @@ APIエンドポイントおよびPWA配信セキュリティのテスト
 """
 from __future__ import annotations
 
+import subprocess
 from fastapi.testclient import TestClient
 
 
@@ -487,6 +488,101 @@ def test_detect_tailscale_dns_name(monkeypatch) -> None:
     monkeypatch.setattr("shutil.which", lambda _: None)
     monkeypatch.setattr("pathlib.Path.is_file", lambda _: False)
     assert detect_tailscale_dns_name() is None
+
+
+def test_api_verify_repository(tmp_path) -> None:
+    from rep_patch.config import RepositoryConfig
+
+    repo = tmp_path / "my_repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    (repo / "main.py").write_text("print('ok')", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+    store = SettingsStore(tmp_path / "settings.local.json")
+    settings = store.load()
+    settings.repositories["my_repo"] = RepositoryConfig(repo_id="my_repo", display_name="My Repo", path=str(repo))
+    store.save(settings)
+
+    client = TestClient(create_app(store))
+    token = client.get("/api/session").json()["token"]
+
+    # 単一リポジトリ検証
+    res = client.post("/api/repositories/my_repo/verify", headers={"X-Rep-Patch-Token": token})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["valid"] is True
+    assert data["repo_id"] == "my_repo"
+
+    # 全リポジトリ一括検証
+    res_all = client.post("/api/home/verify-all", headers={"X-Rep-Patch-Token": token})
+    assert res_all.status_code == 200
+    data_all = res_all.json()
+    assert data_all["all_valid"] is True
+    assert "my_repo" in data_all["results"]
+
+
+def test_api_publish_blocked_by_verification_error(tmp_path) -> None:
+    from rep_patch.config import RepositoryConfig
+
+    patch_repo = tmp_path / "patch_repo"
+    patch_repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=patch_repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=patch_repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=patch_repo, check=True)
+    (patch_repo / "README.md").write_text("patch repo", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=patch_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=patch_repo, check=True)
+
+    app_repo = tmp_path / "app_repo"
+    app_repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=app_repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=app_repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=app_repo, check=True)
+    (app_repo / ".gitignore").write_text("data/\n", encoding="utf-8")
+    (app_repo / "main.py").write_text("print('v1')", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=app_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "v1"], cwd=app_repo, check=True)
+    b_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=app_repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    (app_repo / "main.py").write_text("print('v2')", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=app_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "v2"], cwd=app_repo, check=True)
+
+    # 未追跡の設定ファイルを作成（検証エラーを起こす）
+    data_dir = app_repo / "data"
+    data_dir.mkdir()
+    (data_dir / "config.json").write_text('{"key": "val"}', encoding="utf-8")
+
+    store = SettingsStore(tmp_path / "settings.local.json")
+    settings = store.load()
+    settings.mode = "home"
+    settings.patch_repo = str(patch_repo)
+    settings.patch_password = "password"
+    settings.repositories["app_repo"] = RepositoryConfig(
+        repo_id="app_repo",
+        display_name="App Repo",
+        path=str(app_repo),
+        baseline_commit=b_commit,
+    )
+    store.save(settings)
+
+    client = TestClient(create_app(store))
+    token = client.get("/api/session").json()["token"]
+
+    # 検証なし指定でない場合、検証エラーで公開が失敗すること
+    res_fail = client.post("/api/home/publish", json={"skip_verification": False}, headers={"X-Rep-Patch-Token": token})
+    assert res_fail.status_code == 400
+    assert "会社環境検証" in res_fail.json()["detail"] or "検証" in res_fail.json()["detail"]
+
+    # skip_verification=True の場合は公開が進むこと（エラーで中断されない）
+    res_skip = client.post("/api/home/publish", json={"skip_verification": True}, headers={"X-Rep-Patch-Token": token})
+    assert res_skip.status_code == 200
+    assert res_skip.json()["published"] is True
+
 
 
 
