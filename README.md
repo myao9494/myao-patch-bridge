@@ -14,6 +14,7 @@
 - [会社側の導入・運用](docs/company-operation.md)
 - [セキュリティ設計](docs/security.md)
 - [パッチパッケージ仕様](docs/package-format.md)
+- [会社環境シミュレーション検証（事前クリーン検証）](docs/clean-verification.md)
 - [トラブルシューティング](docs/troubleshooting.md)
 - [開発者向け情報](docs/development.md)
 

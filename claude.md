@@ -30,9 +30,13 @@
   - **パッチ履歴リセット**: パッチ専用リポジトリ（リモート含む）から該当リポジトリの全パッチおよびインデックスを削除・pushし、公開済みコミットをクリアして次回パッチ連番を `#000001` にリセット（`POST /api/repositories/{repo_id}/reset`、初期導入地点の現在HEAD更新オプション対応）
   - **対象選択**: トグルスイッチまたは「すべて選択/すべて解除」でパッチ公開対象を選択
   - **設定管理**: 固定ブランチ、初期導入地点コミットの設定・保存
+  - **会社環境シミュレーション検証（事前クリーン検証）**:
+    - 対象コミットのGit管理ファイルのみを展開した一時ディレクトリ（クリーン環境）を構築し、`.gitignore` による設定ファイル欠落（`.json`, `.txt`, `.yaml` 等）やパッチ適用不整合を事前検知（`POST /api/repositories/{repo_id}/verify`、一括: `POST /api/home/verify-all`）
+    - パッチ公開（`publish`）時に自動で事前検証ガードを実行し、エラー検知時は push を安全に中断（`skip_verification` でスキップ可能）
   - **エディタ連携**: 各リポジトリカードからワンクリックでローカルのAntigravity（Antigravity IDE）を開く（`POST /api/open-antigravity`）
 - **パッチ公開 (`publish`)**:
   - 選択・有効化されたリポジトリの未公開コミット差分をバイナリパッチ（20MiB分割可）として生成
+  - **公開前安全ガード**: 事前クリーン検証により、会社側でファイル不在エラーとなる設定ファイル漏れを自動防止
   - **差分ファイル実体同梱**: 新規追加および変更されたファイルの実体を `added_files/` へ自動保存しハッシュ署名
   - **削除ファイル記録**: 削除されたファイルを `deleted_files` としてマニフェストへ記録
   - **リポジトリ軽量化（最新パッチのみ保持）**: パッチ公開時、パッチ専用リポジトリのワーキングツリーから古いパッチディレクトリを自動クリーンアップし、**今回作成された最新パッチおよび今回分のみの署名付き `package-index.json` のみ** をコミット＆push（GitHubの「Code → Download ZIP」のサイズを常に数KB〜数MBに最小化）
@@ -101,9 +105,11 @@
 | `POST` | `/api/repositories` | リポジトリ手動追加 |
 | `PUT` | `/api/repositories/{repo_id}` | リポジトリ設定更新 |
 | `DELETE` | `/api/repositories/{repo_id}` | リポジトリ登録削除（自宅側） |
+| `POST` | `/api/repositories/{repo_id}/verify` | 単一リポジトリの会社環境シミュレーション検証 |
+| `POST` | `/api/home/verify-all` | 全リポジトリ一括の会社環境シミュレーション検証 |
 | `POST` | `/api/repositories/{repo_id}/reset` | 単一リポジトリのパッチ履歴リセット・リモート削除・#000001再開 |
 | `POST` | `/api/repositories/discover` | アプリルートからのリポジトリ自動再検出 |
-| `POST` | `/api/home/publish` | 自宅側パッチ作成・署名・公開 |
+| `POST` | `/api/home/publish` | 自宅側パッチ作成・署名・公開（事前クリーン検証ガード付き） |
 | `GET` | `/api/company/repositories` | 会社側リポジトリ一覧・状態取得（個別操作用） |
 | `DELETE` | `/api/company/repositories/{repo_id}` | 会社側リポジトリカード削除（除外設定） |
 | `GET` | `/api/company/downloads` | 会社側パッチZIP一覧取得 |
