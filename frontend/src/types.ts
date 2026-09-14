@@ -131,5 +131,23 @@ export interface PublishResult {
   release_error?: string;
 }
 
+export interface CleanVerificationResult {
+  valid: boolean;
+  repo_id: string;
+  branch: string;
+  target_commit: string;
+  errors: string[];
+  warnings: string[];
+  checked_files: string[];
+}
+
+export interface VerifyAllSummary {
+  all_valid: boolean;
+  total_errors: number;
+  total_warnings: number;
+  results: Record<string, CleanVerificationResult>;
+}
+
+
 
 

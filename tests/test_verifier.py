@@ -98,3 +98,36 @@ def test_verify_clean_repository_with_baseline_patch_simulation(tmp_path: Path) 
     assert result["valid"] is True
     assert len(result["errors"]) == 0
     assert "file2.txt" in result["checked_files"]
+
+
+def test_verify_all_repositories(tmp_path: Path) -> None:
+    """登録された複数リポジトリの一括クリーン検証が正しく集計されること"""
+    from rep_patch.config import RepositoryConfig
+    from rep_patch.verifier import verify_all_repositories
+
+    repo1 = tmp_path / "repo1"
+    _init_git_repo(repo1)
+    (repo1 / "main.py").write_text("print('ok')", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo1, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo1, check=True)
+
+    repo2 = tmp_path / "repo2"
+    _init_git_repo(repo2)
+    (repo2 / ".gitignore").write_text("config.json\n", encoding="utf-8")
+    (repo2 / "main.py").write_text("print('ok')", encoding="utf-8")
+    (repo2 / "config.json").write_text("{}", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore", "main.py"], cwd=repo2, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo2, check=True)
+
+    configs = {
+        "repo1": RepositoryConfig(repo_id="repo1", display_name="Repo 1", path=str(repo1), enabled=True),
+        "repo2": RepositoryConfig(repo_id="repo2", display_name="Repo 2", path=str(repo2), enabled=True),
+        "repo3": RepositoryConfig(repo_id="repo3", display_name="Repo 3", path=str(tmp_path / "not_exist"), enabled=False),
+    }
+
+    summary = verify_all_repositories(configs)
+    assert summary["all_valid"] is False
+    assert summary["results"]["repo1"]["valid"] is True
+    assert summary["results"]["repo2"]["valid"] is False
+    assert "repo3" not in summary["results"]  # enabled=False はスキップ
+

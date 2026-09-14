@@ -50,6 +50,7 @@ import {
 } from "lucide-react";
 import { api, jsonBody } from "./api";
 import type {
+  CleanVerificationResult,
   CompanyRepository,
   DownloadPackage,
   OperationResult,
@@ -59,6 +60,7 @@ import type {
   RepositoryCreatePayload,
   ResetResult,
   Settings,
+  VerifyAllSummary,
 } from "./types";
 
 const emptySettings: Settings = {
@@ -113,6 +115,7 @@ export default function App() {
   const [results, setResults] = useState<OperationResult[]>([]);
   const [companyRepos, setCompanyRepos] = useState<CompanyRepository[]>([]);
   const [diagnostics, setDiagnostics] = useState<any>(null);
+  const [verificationResults, setVerificationResults] = useState<Record<string, CleanVerificationResult>>({});
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
 
   const perform = useCallback(async <T,>(label: string, work: () => Promise<T>): Promise<T | undefined> => {
@@ -303,10 +306,54 @@ export default function App() {
     }
   };
 
+  const verifyRepo = async (repo: Repository) => {
+    const value = await perform(`【${repo.display_name}】会社環境シミュレーション検証中`, () =>
+      api<CleanVerificationResult>(`/api/repositories/${repo.repo_id}/verify`, { method: "POST" })
+    );
+    if (value) {
+      setVerificationResults((prev) => ({ ...prev, [repo.repo_id]: value }));
+      if (value.valid) {
+        setNotice(`【${repo.display_name}】会社環境シミュレーション検証に合格しました（ファイル欠落なし）`);
+      } else {
+        setError(`【${repo.display_name}】ファイル欠落・検証エラーが検知されました: ${value.errors.join(" / ")}`);
+      }
+    }
+  };
+
+  const verifyAll = async () => {
+    const value = await perform("全リポジトリの会社環境シミュレーション検証中", () =>
+      api<VerifyAllSummary>("/api/home/verify-all", { method: "POST" })
+    );
+    if (value) {
+      setVerificationResults(value.results);
+      if (value.all_valid) {
+        setNotice("すべてのリポジトリが会社側クリーン環境で正常に検証されました（設定ファイル欠落なし）");
+      } else {
+        setError(`会社環境検証で ${value.total_errors} 件のエラーが検知されました。.gitignoreによる設定ファイル漏れ等を確認してください`);
+      }
+    }
+  };
+
   const publish = async () => {
-    if (!confirm("変更パッチを作成し、パッチ専用リポジトリへpushしますか？")) return;
+    const invalidEntries = Object.entries(verificationResults).filter(([_, r]) => !r.valid);
+    let skipVerification = false;
+    if (invalidEntries.length > 0) {
+      const ok = confirm(
+        `【警告】以下のリポジトリで会社環境シミュレーション検証エラーが検知されています:\n\n` +
+          invalidEntries.map(([id, r]) => `・${id}: ${r.errors.join(", ")}`).join("\n") +
+          `\n\n会社側でファイル不在エラーが発生する可能性があります。\n検証をスキップして公開を強行しますか？`
+      );
+      if (!ok) return;
+      skipVerification = true;
+    } else {
+      if (!confirm("変更パッチを作成し、パッチ専用リポジトリへpushしますか？")) return;
+    }
+
     const value = await perform("パッチを作成・公開中", () =>
-      api<PublishResult>("/api/home/publish", { method: "POST" })
+      api<PublishResult>("/api/home/publish", {
+        method: "POST",
+        ...jsonBody({ skip_verification: skipVerification }),
+      })
     );
     if (value) {
       let msg = value.message;
@@ -503,8 +550,11 @@ export default function App() {
           <HomeDashboard
             repositories={repositories}
             unpublished={unpublished}
+            verificationResults={verificationResults}
             onDiscover={discover}
             onRefresh={loadRepositories}
+            onVerifyAll={verifyAll}
+            onVerifyRepo={verifyRepo}
             onPublish={publish}
             onUpdateRepo={updateRepo}
             onSaveRepo={saveRepository}
@@ -565,8 +615,11 @@ export default function App() {
 function HomeDashboard(props: {
   repositories: Repository[];
   unpublished: number;
+  verificationResults: Record<string, CleanVerificationResult>;
   onDiscover: () => void;
   onRefresh: () => void;
+  onVerifyAll: () => void;
+  onVerifyRepo: (repo: Repository) => void;
   onPublish: () => void;
   onUpdateRepo: (id: string, value: Partial<Repository>) => void;
   onSaveRepo: (repo: Repository) => void;
@@ -587,11 +640,14 @@ function HomeDashboard(props: {
     <section className="toolbar">
       <div>
         <h2>対象リポジトリ</h2>
-        <p>カードの追加・削除やトグルで対象を選択し、ブランチと導入地点を管理します</p>
+        <p>カードの追加・削除やトグルで対象を選択し、会社環境検証・ブランチ・導入地点を管理します</p>
       </div>
       <div className="button-row wrap">
         <button className="button primary" onClick={props.onOpenAddModal}>
           <Plus size={17} />リポジトリを追加
+        </button>
+        <button className="button secondary" onClick={props.onVerifyAll} title="Git追跡ファイルのみを展開したクリーン環境で、設定ファイルの欠落やパッチ適用エラーがないか一括検証します">
+          <ShieldCheck size={17} />会社環境検証
         </button>
         <button className="button ghost" onClick={props.onDiscover}>
           <HardDrive size={17} />再検出
@@ -694,11 +750,36 @@ function HomeDashboard(props: {
                   onChange={(e) => props.onUpdateRepo(repo.repo_id, { baseline_commit: e.target.value })}
                 />
               </label>
+              {props.verificationResults[repo.repo_id] && (
+                <div style={{ marginTop: "10px", padding: "8px 12px", borderRadius: "6px", fontSize: "0.85rem", backgroundColor: props.verificationResults[repo.repo_id].valid ? "#e6f4ea" : "#fce8e6", color: props.verificationResults[repo.repo_id].valid ? "#137333" : "#c5221f" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: "bold" }}>
+                    {props.verificationResults[repo.repo_id].valid ? (
+                      <><Check size={16} />会社環境検証OK（設定ファイル欠落なし）</>
+                    ) : (
+                      <><AlertTriangle size={16} />会社環境でファイル不在エラーが検知されました</>
+                    )}
+                  </div>
+                  {!props.verificationResults[repo.repo_id].valid && props.verificationResults[repo.repo_id].errors.length > 0 && (
+                    <ul style={{ margin: "6px 0 0 16px", padding: 0, fontSize: "0.8rem" }}>
+                      {props.verificationResults[repo.repo_id].errors.map((err, i) => (
+                        <li key={i}>{err}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
               <div className="button-row" style={{ marginTop: "12px", justifyContent: "space-between", alignItems: "center" }}>
                 <button className="text-button" onClick={() => props.onSaveRepo(repo)}>
                   <Save size={15} />この設定を保存
                 </button>
                 <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                  <button
+                    className="button ghost small"
+                    title="会社側クリーン環境シミュレーション検証を実行"
+                    onClick={() => props.onVerifyRepo(repo)}
+                  >
+                    <ShieldCheck size={14} />検証
+                  </button>
                   <button
                     className="button ghost small"
                     title="パッチ履歴をリセットして#000001から再作成可能にします"
