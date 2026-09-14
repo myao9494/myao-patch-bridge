@@ -39,6 +39,7 @@ EXCLUDED_PATTERNS = {
     ".coverage",
     "htmlcov",
     "indexes",
+    "models",
 }
 IGNORE_FILENAME_PATTERNS = {
     ".ds_store",
@@ -53,8 +54,12 @@ def _is_noise_path(rel_path: Path) -> bool:
     parts = list(rel_path.parts)
     if any(p in EXCLUDED_PATTERNS or p.startswith(".") for p in parts[:-1]):
         return True
+    if any(p.lower() in {"original_app", "temp", "backup", "backups", "scratch"} for p in parts[:-1]):
+        return True
     filename = rel_path.name.lower()
     if filename in IGNORE_FILENAME_PATTERNS:
+        return True
+    if "history" in filename or "session" in filename or filename.startswith("temp"):
         return True
     if filename.endswith((".log", ".pyc", ".tmp", ".bak", ".db", ".db-wal", ".db-shm")):
         return True
