@@ -5,6 +5,7 @@ Myao Patch Bridge のローカル REST API サーバー
 - ローカルおよびVPN/プライベートネットワーク限定アクセス、およびCSRF保護用セッショントークン検証
 - 設定管理（GET/PUT /api/settings）
 - リポジトリ管理（GET /api/repositories, POST /api/repositories, PUT /api/repositories/{repo_id}, DELETE /api/repositories/{repo_id}, POST /api/repositories/{repo_id}/reset, POST /api/repositories/discover）
+- 会社側クリーン環境シミュレーション検証（POST /api/repositories/{repo_id}/verify, POST /api/home/verify-all）
 - 自宅パッチ公開（POST /api/home/publish）
 - 会社パッチ適用・検証・コミット・一覧・カード削除・適用開始番号初期化（GET /api/company/repositories, DELETE /api/company/repositories/{repo_id}, GET /api/company/downloads, POST /api/company/inspect, POST /api/company/apply-all, POST /api/company/retry, POST /api/company/commit-pending, POST /api/company/repositories/{repo_id}/sequence, POST /api/company/repositories/sequence-all）
 - エディタ起動（POST /api/open-vscode, POST /api/open-antigravity）
@@ -48,6 +49,7 @@ from .home import (
     update_repository,
 )
 from .security import is_allowed_client_ip
+from .verifier import verify_all_repositories, verify_clean_repository
 
 
 class SettingsUpdate(BaseModel):
@@ -69,6 +71,10 @@ class RepositoryUpdate(BaseModel):
 
 class RepositoryReset(BaseModel):
     new_baseline_commit: str | None = None
+
+
+class PublishRequest(BaseModel):
+    skip_verification: bool = False
 
 
 
@@ -213,10 +219,25 @@ def create_app(store: SettingsStore | None = None) -> FastAPI:
         new_baseline = payload.new_baseline_commit if payload else None
         return reset_repository_patches(settings, settings_store, repo_id, new_baseline)
 
-    @app.post("/api/home/publish")
-    def publish_patches() -> dict[str, Any]:
+    @app.post("/api/repositories/{repo_id}/verify")
+    def verify_repo(repo_id: str) -> dict[str, Any]:
         settings = settings_store.load()
-        return publish(settings, settings_store)
+        if repo_id not in settings.repositories:
+            raise RepPatchError(f"リポジトリが登録されていません: {repo_id}")
+        config = settings.repositories[repo_id]
+        base = config.published_commit or config.baseline_commit or None
+        return verify_clean_repository(config.path, branch=config.branch, baseline_commit=base)
+
+    @app.post("/api/home/verify-all")
+    def verify_all() -> dict[str, Any]:
+        settings = settings_store.load()
+        return verify_all_repositories(settings.repositories)
+
+    @app.post("/api/home/publish")
+    def publish_patches(payload: PublishRequest | None = None) -> dict[str, Any]:
+        settings = settings_store.load()
+        skip = payload.skip_verification if payload else False
+        return publish(settings, settings_store, skip_verification=skip)
 
     @app.get("/api/company/repositories")
     def company_repositories() -> dict[str, Any]:

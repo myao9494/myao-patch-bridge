@@ -35,6 +35,7 @@ from .git import (
 )
 from .packages import PACKAGE_TYPE, SCHEMA_VERSION, create_release_bundle, load_index, split_patch, write_json
 from .security import sha256_bytes, sign_document
+from .verifier import verify_clean_repository
 
 
 def repo_id_for(name: str) -> str:
@@ -200,13 +201,34 @@ def _push_pending(patch_root: Path) -> None:
         run_git(patch_root, ["push"])
 
 
-def publish(settings: Settings, store: SettingsStore) -> dict[str, Any]:
+def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool = False) -> dict[str, Any]:
     if settings.mode != "home":
         raise RepPatchError("パッチの公開は自宅モードでのみ実行できます")
     if not settings.patch_password:
         raise RepPatchError("パッチ検証用パスワードを設定してください")
     patch_root = Path(settings.patch_repo).expanduser()
     ensure_repository(patch_root)
+
+    # 公開前クリーン環境シミュレーション検証（会社側でのファイル不在エラー防止）
+    if not skip_verification:
+        for config in settings.repositories.values():
+            if not config.enabled:
+                continue
+            repo = Path(config.path)
+            ensure_repository(repo)
+            if not config.baseline_commit:
+                continue
+            target = resolve_commit(repo, config.branch)
+            source = config.published_commit or resolve_commit(repo, config.baseline_commit)
+            if source == target:
+                continue
+            verification = verify_clean_repository(repo, branch=config.branch, baseline_commit=source)
+            if not verification["valid"]:
+                err_msg = " / ".join(verification["errors"])
+                raise RepPatchError(
+                    f"会社環境検証（ファイル不在・整合性チェック）でエラーが検知されたため、パッチ公開を中断しました [{config.display_name}]: {err_msg}"
+                )
+
     if run_git(patch_root, ["status", "--porcelain=v1"]).text:
         raise RepPatchError("パッチ専用リポジトリに未コミットの変更があります")
     _push_pending(patch_root)

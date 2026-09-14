@@ -528,14 +528,19 @@ def test_api_verify_repository(tmp_path) -> None:
 def test_api_publish_blocked_by_verification_error(tmp_path) -> None:
     from rep_patch.config import RepositoryConfig
 
+    remote_bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
+
     patch_repo = tmp_path / "patch_repo"
     patch_repo.mkdir()
     subprocess.run(["git", "init", "-b", "main"], cwd=patch_repo, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=patch_repo, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=patch_repo, check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote_bare)], cwd=patch_repo, check=True)
     (patch_repo / "README.md").write_text("patch repo", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=patch_repo, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=patch_repo, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=patch_repo, check=True)
 
     app_repo = tmp_path / "app_repo"
     app_repo.mkdir()
