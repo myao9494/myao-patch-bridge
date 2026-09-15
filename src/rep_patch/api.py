@@ -63,6 +63,7 @@ class RepositoryCreate(BaseModel):
     branch: str = ""
     baseline_commit: str = ""
     enabled: bool = True
+    clean_verify_ignore_patterns: list[str] = []
 
 
 class RepositoryUpdate(BaseModel):
@@ -226,7 +227,12 @@ def create_app(store: SettingsStore | None = None) -> FastAPI:
             raise RepPatchError(f"リポジトリが登録されていません: {repo_id}")
         config = settings.repositories[repo_id]
         base = config.published_commit or config.baseline_commit or None
-        return verify_clean_repository(config.path, branch=config.branch, baseline_commit=base)
+        return verify_clean_repository(
+            config.path,
+            branch=config.branch,
+            baseline_commit=base,
+            ignore_patterns=config.clean_verify_ignore_patterns,
+        )
 
     @app.post("/api/home/verify-all")
     def verify_all() -> dict[str, Any]:

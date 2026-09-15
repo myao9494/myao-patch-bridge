@@ -32,7 +32,9 @@
   - **設定管理**: 固定ブランチ、初期導入地点コミットの設定・保存
   - **会社環境シミュレーション検証（事前クリーン検証）**:
     - 対象コミットのGit管理ファイルのみを展開した一時ディレクトリ（クリーン環境）を構築し、`.gitignore` による設定ファイル欠落（`.json`, `.txt`, `.yaml` 等）やパッチ適用不整合を事前検知（`POST /api/repositories/{repo_id}/verify`、一括: `POST /api/home/verify-all`）
-    - パッチ公開（`publish`）時に自動で事前検証ガードを実行し、エラー検知時は push を安全に中断（`skip_verification` でスキップ可能）
+    - **テンプレート自動除外**: `.example` / `.sample` / `.template` / `.default` がGit追跡されている場合、対応するローカル実ファイル（例: `synonym_groups.txt`）は環境別設定として欠落エラーから除外
+    - **カスタム除外パターン (`clean_verify_ignore_patterns`)**: リポジトリ設定ごとに検証除外パターン（例: `backend/data/*` 等）を設定可能
+    - **公開時安全ガード & リカバリ**: パッチ公開（`publish`）時に自動で事前検証ガードを実行し、エラー検知時は中断。UI上でエラー確認後に「検証をスキップして公開」を即座に選択可能（`skip_verification: true`）
   - **エディタ連携**: 各リポジトリカードからワンクリックでローカルのAntigravity（Antigravity IDE）を開く（`POST /api/open-antigravity`）
 - **パッチ公開 (`publish`)**:
   - 選択・有効化されたリポジトリの未公開コミット差分をバイナリパッチ（20MiB分割可）として生成

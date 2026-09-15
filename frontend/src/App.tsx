@@ -8,6 +8,7 @@
  *   - リポジトリカードの削除（管理対象からの除外）
  *   - リポジトリの有効/無効トグル（パッチ公開対象の選択）
  *   - リポジトリ設定の保存および未公開パッチの作成・公開（今回分軽量ZIP生成・GitHub Releases自動公開対応）
+ *   - 会社環境シミュレーション検証（事前クリーン検証・テンプレート除外・カスタム除外パターン設定・エラー時スキップ公開）
  *   - リポジトリのパッチ履歴リセット（000001からの再作成・リモートパッチ削除・初期導入地点更新オプション）
  * - 会社モード（CompanyDashboard）:
  *   - ダウンロード済みパッチZIPの検索・選択・署名検証
@@ -349,25 +350,52 @@ export default function App() {
       if (!confirm("変更パッチを作成し、パッチ専用リポジトリへpushしますか？")) return;
     }
 
-    const value = await perform("パッチを作成・公開中", () =>
-      api<PublishResult>("/api/home/publish", {
+    const executePublish = async (skip: boolean) => {
+      return await api<PublishResult>("/api/home/publish", {
         method: "POST",
-        ...jsonBody({ skip_verification: skipVerification }),
-      })
-    );
-    if (value) {
-      let msg = value.message;
-      if (value.release_url) {
-        msg += `\nGitHub Releasesへ公開しました: ${value.release_url}`;
-      } else if (value.release_error) {
-        msg += `\n(GitHub Releases公開警告: ${value.release_error})`;
+        ...jsonBody({ skip_verification: skip }),
+      });
+    };
+
+    setBusy("パッチを作成・公開中");
+    setError("");
+    setNotice("");
+    try {
+      let res: PublishResult;
+      try {
+        res = await executePublish(skipVerification);
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (errMsg.includes("会社環境検証") && !skipVerification) {
+          const force = confirm(
+            `${errMsg}\n\n会社環境シミュレーション検証でエラーが検知されました。\n検証をスキップしてパッチ作成・公開を強行しますか？`
+          );
+          if (force) {
+            res = await executePublish(true);
+          } else {
+            setError(errMsg);
+            return;
+          }
+        } else {
+          throw err;
+        }
       }
-      if (value.bundle_name && value.bundle_size) {
-        const sizeKb = Math.round(value.bundle_size / 1024);
-        msg += `\n今回分ZIP: ${value.bundle_name} (${sizeKb} KB)`;
+      let msg = res.message;
+      if (res.release_url) {
+        msg += `\nGitHub Releasesへ公開しました: ${res.release_url}`;
+      } else if (res.release_error) {
+        msg += `\n(GitHub Releases公開警告: ${res.release_error})`;
+      }
+      if (res.bundle_name && res.bundle_size) {
+        const sizeKb = Math.round(res.bundle_size / 1024);
+        msg += `\n今回分ZIP: ${res.bundle_name} (${sizeKb} KB)`;
       }
       setNotice(msg);
       await loadRepositories();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy("");
     }
   };
 
@@ -750,6 +778,21 @@ function HomeDashboard(props: {
                   onChange={(e) => props.onUpdateRepo(repo.repo_id, { baseline_commit: e.target.value })}
                 />
               </label>
+              <label>
+                会社環境検証の除外パターン（カンマ区切り）
+                <input
+                  placeholder="backend/data/*, custom.txt 等（省略可）"
+                  value={(repo.clean_verify_ignore_patterns ?? []).join(", ")}
+                  onChange={(e) =>
+                    props.onUpdateRepo(repo.repo_id, {
+                      clean_verify_ignore_patterns: e.target.value
+                        .split(",")
+                        .map((s) => s.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                />
+              </label>
               {props.verificationResults[repo.repo_id] && (
                 <div style={{ marginTop: "10px", padding: "8px 12px", borderRadius: "6px", fontSize: "0.85rem", backgroundColor: props.verificationResults[repo.repo_id].valid ? "#e6f4ea" : "#fce8e6", color: props.verificationResults[repo.repo_id].valid ? "#137333" : "#c5221f" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: "bold" }}>
@@ -915,16 +958,22 @@ function AddRepositoryModal(props: {
   const [kind, setKind] = useState<"app" | "obsidian">("app");
   const [branch, setBranch] = useState("");
   const [baselineCommit, setBaselineCommit] = useState("");
+  const [cleanVerifyIgnorePatterns, setCleanVerifyIgnorePatterns] = useState("");
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!path.trim()) return;
+    const ignoreList = cleanVerifyIgnorePatterns
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
     await props.onAdd({
       path: path.trim(),
       display_name: displayName.trim() || undefined,
       kind,
       branch: branch.trim() || undefined,
       baseline_commit: baselineCommit.trim() || undefined,
+      clean_verify_ignore_patterns: ignoreList.length > 0 ? ignoreList : undefined,
       enabled: true,
     });
   };
@@ -1005,6 +1054,17 @@ function AddRepositoryModal(props: {
                 value={baselineCommit}
                 onChange={(e) => setBaselineCommit(e.target.value)}
               />
+            </label>
+
+            <label className="field">
+              <span>会社環境検証の除外パターン（カンマ区切り・省略可）</span>
+              <input
+                type="text"
+                placeholder="backend/data/*, custom.txt 等"
+                value={cleanVerifyIgnorePatterns}
+                onChange={(e) => setCleanVerifyIgnorePatterns(e.target.value)}
+              />
+              <small className="field-hint">Git管理外のローカル固有データ等を誤検知から除外します</small>
             </label>
           </div>
           <div className="modal-footer">

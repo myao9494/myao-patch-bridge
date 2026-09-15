@@ -589,6 +589,46 @@ def test_api_publish_blocked_by_verification_error(tmp_path) -> None:
     assert res_skip.json()["published"] is True
 
 
+def test_api_verify_with_clean_verify_ignore_patterns(tmp_path) -> None:
+    """clean_verify_ignore_patterns を設定した場合、APIの検証エンドポイントで正しく合格すること"""
+    from rep_patch.config import RepositoryConfig
+
+    app_repo = tmp_path / "app_repo"
+    app_repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=app_repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=app_repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=app_repo, check=True)
+    (app_repo / ".gitignore").write_text("backend/data/\n", encoding="utf-8")
+    (app_repo / "main.py").write_text("print('v1')", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=app_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "v1"], cwd=app_repo, check=True)
+
+    data_dir = app_repo / "backend" / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "config.json").write_text('{"key": "val"}', encoding="utf-8")
+
+    store = SettingsStore(tmp_path / "settings.local.json")
+    settings = store.load()
+    settings.mode = "home"
+    settings.repositories["app_repo"] = RepositoryConfig(
+        repo_id="app_repo",
+        display_name="App Repo",
+        path=str(app_repo),
+        clean_verify_ignore_patterns=["backend/data/*"],
+    )
+    store.save(settings)
+
+    client = TestClient(create_app(store))
+    token = client.get("/api/session").json()["token"]
+
+    res = client.post("/api/repositories/app_repo/verify", headers={"X-Rep-Patch-Token": token})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["valid"] is True
+    assert len(data["errors"]) == 0
+
+
+
 
 
 

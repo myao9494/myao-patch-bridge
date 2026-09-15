@@ -5,12 +5,15 @@
 - verify_clean_repository:
   1. 対象コミット（HEAD）のGit追跡ファイルのみを一時ディレクトリに展開（git archive）
   2. 自宅ローカルの作業ツリーに存在し、.gitignore等でGit管理から外れている重要設定ファイル（.json, .txt, .yaml, .toml等）を検知し、ファイル欠落エラーとして報告
-  3. 重要ディレクトリ（backend/data, frontend/dist等）の空ディレクトリや必須成果物の欠落を検査
-  4. 直前コミット（baseline_commit）が指定されている場合、パッチ生成と差分適用シミュレーションを実施
-  5. 検証結果（valid, repo_id, target_commit, errors, warnings, checked_files）を返却
+  3. Git追跡対象に .example / .sample / .template / .default 等のテンプレートファイルが存在する場合、ローカル実ファイルの欠落を許容（エラーから除外）
+  4. ignore_patterns（カスタム除外パターン）に合致するファイルは検証から除外
+  5. 重要ディレクトリの空ディレクトリや必須成果物の欠落を検査
+  6. 直前コミット（baseline_commit）が指定されている場合、パッチ生成と差分適用シミュレーションを実施
+  7. 検証結果（valid, repo_id, target_commit, errors, warnings, checked_files）を返却
 """
 from __future__ import annotations
 
+import fnmatch
 import os
 import shutil
 import subprocess
@@ -23,6 +26,7 @@ from .git import ensure_repository, resolve_commit, run_git
 
 
 CONFIG_EXTENSIONS = {".json", ".txt", ".yaml", ".yml", ".toml", ".ini", ".conf", ".xml"}
+TEMPLATE_SUFFIXES = {".example", ".sample", ".template", ".default"}
 EXCLUDED_PATTERNS = {
     ".venv",
     "venv",
@@ -66,10 +70,26 @@ def _is_noise_path(rel_path: Path) -> bool:
     return False
 
 
+def _matches_any_pattern(path_str: str, patterns: list[str]) -> bool:
+    """パスまたはファイル名がいずれかのGlobパターンに合致するかを判定する"""
+    name = Path(path_str).name
+    for pat in patterns:
+        pat = pat.strip()
+        if not pat:
+            continue
+        if fnmatch.fnmatch(path_str, pat) or fnmatch.fnmatch(name, pat):
+            return True
+        # ディレクトリパターンの場合（例: backend/data/* や backend/data/**）
+        if pat.endswith("/*") and fnmatch.fnmatch(path_str, pat[:-2] + "/**"):
+            return True
+    return False
+
+
 def verify_clean_repository(
     repo_path: Path | str,
     branch: str = "main",
     baseline_commit: str | None = None,
+    ignore_patterns: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     リポジトリが会社側クリーン環境（Git追跡対象ファイルのみ）で正常に動作・整合するかをシミュレーション検証する
@@ -79,6 +99,7 @@ def verify_clean_repository(
 
     target_commit = resolve_commit(repo, branch)
     repo_id = repo.name
+    custom_patterns = list(ignore_patterns or [])
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -99,13 +120,20 @@ def verify_clean_repository(
         if tar_proc.returncode != 0:
             raise RepPatchError(f"クリーン環境の展開に失敗しました: {tar_proc.stderr.decode()}")
 
-        # クリーン環境に存在する全ファイル一覧
+        # クリーン環境に存在する全ファイル一覧およびテンプレート（.example等）の基底パス
         tracked_rel_paths = set()
+        tracked_template_bases = set()
         for p in clean_dir.rglob("*"):
             if p.is_file():
                 rel = p.relative_to(clean_dir).as_posix()
                 tracked_rel_paths.add(rel)
                 checked_files.append(rel)
+
+                # テンプレートファイルの対応元パスを記録（例: foo.txt.example -> foo.txt）
+                for suffix in TEMPLATE_SUFFIXES:
+                    if rel.endswith(suffix):
+                        base_rel = rel[: -len(suffix)]
+                        tracked_template_bases.add(base_rel)
 
         # 2. ローカル作業ツリーの走査:
         # ローカルに存在しているが、.gitignore等でGit管理から漏れている重要設定ファイル（.json, .txt等）を検知
@@ -121,7 +149,18 @@ def verify_clean_repository(
                     continue
 
                 rel_posix = rel.as_posix()
+                if _matches_any_pattern(rel_posix, custom_patterns):
+                    continue
+
+                # .example 自体はエラー対象外
+                if any(rel_posix.endswith(s) for s in TEMPLATE_SUFFIXES):
+                    continue
+
                 if rel.suffix.lower() in CONFIG_EXTENSIONS:
+                    # Git側にテンプレート（.example等）が存在する場合は環境別ローカル設定とみなし除外
+                    if rel_posix in tracked_template_bases:
+                        continue
+
                     if rel_posix not in tracked_rel_paths:
                         errors.append(
                             f"重要設定ファイル '{rel_posix}' がローカルに存在しますが、.gitignoreまたは未コミットのためGit管理に含まれていません。会社環境でファイル不在エラーが発生します。"
@@ -187,9 +226,16 @@ def verify_all_repositories(repositories: dict[str, Any]) -> dict[str, Any]:
         baseline = getattr(config, "baseline_commit", "") or ""
         published = getattr(config, "published_commit", "") or ""
         base = published or baseline or None
+        ignore_pats = (
+            getattr(config, "clean_verify_ignore_patterns", None)
+            or (config.get("clean_verify_ignore_patterns") if isinstance(config, dict) else None)
+            or []
+        )
 
         try:
-            res = verify_clean_repository(path, branch=branch, baseline_commit=base)
+            res = verify_clean_repository(
+                path, branch=branch, baseline_commit=base, ignore_patterns=ignore_pats
+            )
         except Exception as exc:
             res = {
                 "valid": False,

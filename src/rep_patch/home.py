@@ -140,6 +140,7 @@ def add_repository(
         enabled=enabled,
         branch=branch,
         baseline_commit=baseline_commit,
+        clean_verify_ignore_patterns=list(payload.get("clean_verify_ignore_patterns", [])),
     )
     settings.repositories[repo_id] = config
     store.save(settings)
@@ -162,7 +163,15 @@ def update_repository(
     if repo_id not in settings.repositories:
         raise RepPatchError(f"リポジトリが登録されていません: {repo_id}")
     config = settings.repositories[repo_id]
-    for key in ["display_name", "path", "kind", "enabled", "branch", "baseline_commit"]:
+    for key in [
+        "display_name",
+        "path",
+        "kind",
+        "enabled",
+        "branch",
+        "baseline_commit",
+        "clean_verify_ignore_patterns",
+    ]:
         if key in updates:
             setattr(config, key, updates[key])
     if config.baseline_commit:
@@ -222,7 +231,12 @@ def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool
             source = config.published_commit or resolve_commit(repo, config.baseline_commit)
             if source == target:
                 continue
-            verification = verify_clean_repository(repo, branch=config.branch, baseline_commit=source)
+            verification = verify_clean_repository(
+                repo,
+                branch=config.branch,
+                baseline_commit=source,
+                ignore_patterns=config.clean_verify_ignore_patterns,
+            )
             if not verification["valid"]:
                 err_msg = " / ".join(verification["errors"])
                 raise RepPatchError(

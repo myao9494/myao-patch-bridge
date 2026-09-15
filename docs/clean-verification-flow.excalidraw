@@ -226,13 +226,13 @@
       "roundness": null,
       "boundElements": [],
       "updated": 1,
-      "text": "公開中断・安全ガード\n「重要設定ファイルが除外されています」\n自宅側で .gitignore 修正を促す",
-      "fontSize": 13,
+      "text": "公開中断・安全ガード\n「重要設定ファイルが除外されています」\n(スキップ公開・除外パターン設定で継続可)",
+      "fontSize": 12,
       "fontFamily": 1,
       "textAlign": "center",
       "verticalAlign": "middle",
       "containerId": null,
-      "originalText": "公開中断・安全ガード\n「重要設定ファイルが除外されています」\n自宅側で .gitignore 修正を促す"
+      "originalText": "公開中断・安全ガード\n「重要設定ファイルが除外されています」\n(スキップ公開・除外パターン設定で継続可)"
     },
     {
       "type": "arrow",

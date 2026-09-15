@@ -27,6 +27,7 @@ export interface Repository {
   changes?: number;
   unpublished_commits?: number;
   error?: string;
+  clean_verify_ignore_patterns?: string[];
 }
 
 export interface RepositoryCreatePayload {
@@ -36,6 +37,7 @@ export interface RepositoryCreatePayload {
   branch?: string;
   baseline_commit?: string;
   enabled?: boolean;
+  clean_verify_ignore_patterns?: string[];
 }
 
 export interface Settings {
