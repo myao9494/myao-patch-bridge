@@ -6,7 +6,9 @@
   1. Git管理対象ファイルのみを展開したクリーン環境（一時ディレクトリ）を構築
   2. ローカルに存在する重要設定ファイルが .gitignore 等でGit管理から漏れている場合、ファイル欠落エラーを検知
   3. Git管理対象に正しく含まれている場合は検証合格（valid=True）を返却
-  4. 直前コミットからのパッチ生成および模擬適用がクリーン環境で正常に完了することを検証
+  4. .example / .sample / .template 等のテンプレートファイルがGit管理に含まれている場合、実ファイル欠落を許容（エラーとしない）
+  5. ignore_patterns（除外パターン）に一致するファイルは検証から除外
+  6. 直前コミットからのパッチ生成および模擬適用がクリーン環境で正常に完了することを検証
 """
 from __future__ import annotations
 
@@ -130,4 +132,62 @@ def test_verify_all_repositories(tmp_path: Path) -> None:
     assert summary["results"]["repo1"]["valid"] is True
     assert summary["results"]["repo2"]["valid"] is False
     assert "repo3" not in summary["results"]  # enabled=False はスキップ
+
+
+def test_verify_clean_repository_ignores_files_with_template_in_git(tmp_path: Path) -> None:
+    """Git管理に対象の.example等のテンプレートファイルが存在する場合、ローカル実ファイルの欠落をエラーとしない"""
+    repo = tmp_path / "app_repo"
+    _init_git_repo(repo)
+
+    # .gitignore に実設定ファイルを除外指定し、.example のみコミット
+    (repo / ".gitignore").write_text("data/synonym_groups.txt\n!data/*.example\n", encoding="utf-8")
+    (repo / "main.py").write_text("print('ok')", encoding="utf-8")
+    data_dir = repo / "data"
+    data_dir.mkdir()
+    (data_dir / "synonym_groups.txt.example").write_text("template", encoding="utf-8")
+
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "add template"], cwd=repo, check=True)
+
+    # ローカルで実ファイルを作成（.gitignoreされている）
+    (data_dir / "synonym_groups.txt").write_text("local custom synonyms", encoding="utf-8")
+
+    result = verify_clean_repository(repo, branch="main")
+
+    # .example がGitにあるため、synonym_groups.txt の欠落エラーにはならない
+    assert result["valid"] is True
+    assert len(result["errors"]) == 0
+
+
+def test_verify_clean_repository_with_custom_ignore_patterns(tmp_path: Path) -> None:
+    """ignore_patterns に指定されたパスやGlobパターンに一致するファイルは検証エラーから除外される"""
+    repo = tmp_path / "app_repo"
+    _init_git_repo(repo)
+
+    (repo / ".gitignore").write_text("backend/data/\n", encoding="utf-8")
+    (repo / "main.py").write_text("print('ok')", encoding="utf-8")
+    backend_data = repo / "backend" / "data"
+    backend_data.mkdir(parents=True)
+    (backend_data / ".gitkeep").write_text("", encoding="utf-8")
+
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init with gitkeep"], cwd=repo, check=True)
+
+    # ローカル専用の設定ファイル群
+    (backend_data / "config.json").write_text("{}", encoding="utf-8")
+    (backend_data / "custom.txt").write_text("custom", encoding="utf-8")
+
+    # 1. 除外パターンなしではエラー
+    res_default = verify_clean_repository(repo, branch="main")
+    assert res_default["valid"] is False
+
+    # 2. ignore_patterns に "backend/data/*" を指定した場合は合格
+    res_ignored = verify_clean_repository(
+        repo,
+        branch="main",
+        ignore_patterns=["backend/data/*", "backend/data/**"],
+    )
+    assert res_ignored["valid"] is True
+    assert len(res_ignored["errors"]) == 0
+
 
