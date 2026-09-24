@@ -96,6 +96,10 @@ def test_publish_creates_package_pushes_and_advances_cursor(tmp_path: Path, git_
     assert "deleted_files" in manifest
     assert "to_delete.txt" in manifest["deleted_files"]
 
+    # パッチ専用リポジトリの .gitattributes に packages/** binary が設定され、改行コード変換が防止されているか検証
+    gitattributes_content = (patch_repo / ".gitattributes").read_text(encoding="utf-8")
+    assert "packages/** binary" in gitattributes_content
+
 
 def test_reset_repository_patches_clears_packages_and_resets_sequence(
     tmp_path: Path, git_helpers

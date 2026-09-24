@@ -11,6 +11,7 @@
 - test_init_repository_sequence_and_apply_from_sequence_two: 適用開始番号指定によるstate.json生成と連番スキップ適用の検証
 - test_init_all_repositories_sequence: 全リポジトリ一括での適用開始番号初期化・state.json生成検証
 - test_apply_auto_commits_uncommitted_changes_and_immediately_commits_patch: 未コミット変更の自動事前コミットとパッチ適用の即時確定・クリーン化検証
+- test_apply_added_files_with_crlf_lf_conversion: Git改行コード変換（CRLF↔LF）が生じた追加ファイルでも破損と誤判定されず安全に検証・復元適用される検証
 """
 from __future__ import annotations
 
@@ -578,6 +579,82 @@ def test_apply_auto_commits_uncommitted_changes_and_immediately_commits_patch(
     state = load_state(company, "sample-app")
     assert state["confirmed_sequence"] == 1
     assert state["pending_sequences"] == []
+
+
+def test_apply_added_files_with_crlf_lf_conversion(
+    tmp_path: Path, git_helpers
+) -> None:
+    """
+    Obsidianプラグイン等の追加ファイルにおいて、マニフェスト署名時点（自宅側CRLF）と
+    ZIP内ファイル実体（GitやアーカイブによるLF変換）で改行コード差異が発生しても、
+    破損エラーと誤判定されず透過的に検証および元改行コード復元・適用されるテスト
+    """
+    from rep_patch.company import inspect_archive
+
+    git, init_repo = git_helpers
+
+    # 自宅側: base -> patch1
+    home = init_repo(tmp_path / "home-obsidian")
+    (home / "app.txt").write_text("v0\n", encoding="utf-8")
+    git(home, "add", "-A")
+    git(home, "commit", "-m", "base")
+    c0 = git(home, "rev-parse", "HEAD").decode().strip()
+
+    # プラグインの manifest.json を CRLF で作成
+    plugin_dir = home / ".obsidian" / "plugins" / "sample-plugin"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    manifest_content = '{\r\n  "id": "sample-plugin",\r\n  "version": "1.0.0"\r\n}\r\n'.encode("utf-8")
+    (plugin_dir / "manifest.json").write_bytes(manifest_content)
+
+    git(home, "add", "-A")
+    git(home, "commit", "-m", "add plugin")
+    c1 = git(home, "rev-parse", "HEAD").decode().strip()
+
+    # 自宅側パッチZIPを作成（マニフェストには CRLF のサイズとハッシュが記録される）
+    raw_zip_path = make_package_repo(tmp_path / "patch_raw", home, git, [(c0, c1)])
+
+    # ZIP内の一部の追加ファイルを LF (\n) に変換した改変ZIPを模倣作成
+    # （Git の *.json text eol=lf や GitHub Download ZIP 等による改行コード正規化を再現）
+    modified_zip_path = tmp_path / "myao_app_patch-main.zip"
+    with zipfile.ZipFile(raw_zip_path, "r") as src_zf, zipfile.ZipFile(
+        modified_zip_path, "w", compression=zipfile.ZIP_DEFLATED
+    ) as dst_zf:
+        for item in src_zf.infolist():
+            data = src_zf.read(item.filename)
+            if "sample-plugin/manifest.json" in item.filename:
+                # CRLF -> LF に変換
+                data = data.replace(b"\r\n", b"\n")
+            dst_zf.writestr(item, data)
+
+    # 会社側
+    company_root = tmp_path / "company-apps"
+    company = init_repo(company_root / "sample-app")
+    (company / "app.txt").write_text("v0\n", encoding="utf-8")
+    git(company, "add", "-A")
+    git(company, "commit", "-m", "company base")
+
+    settings = Settings(
+        mode="company",
+        company_apps_root=str(company_root),
+        download_dir=str(tmp_path),
+        patch_password=PASSWORD,
+    )
+
+    # 1. inspect_archive が「追加ファイルが破損しています」で落ちずに検証成功すること
+    inspected = inspect_archive(settings, str(modified_zip_path))
+    assert inspected["package_count"] == 1
+    assert inspected["repository_count"] == 1
+
+    # 2. apply_archive でパッチが正常に適用・コミットされること
+    res = apply_archive(settings, str(modified_zip_path))
+    assert res["failed"] == 0
+    assert res["succeeded"] == 1
+
+    # 3. 会社側のプラグイン manifest.json が元の CRLF のバイト列として正しく配置されていること
+    applied_file = company / ".obsidian" / "plugins" / "sample-plugin" / "manifest.json"
+    assert applied_file.exists()
+    assert applied_file.read_bytes() == manifest_content
+
 
 
 
