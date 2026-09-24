@@ -26,7 +26,9 @@ myao_app_patch-main/
 パッチ公開時にダウンロードフォルダへ直接出力される単一ZIP（`myao_app_patch_YYYYMMDD_HHMMSS_ffffff.zip`）です。
 リポジトリの「Download ZIP」と同様に、今回作成された連番フォルダと今回分の `package-index.json` のみで構成されます。
 
-Patch Appはパッチ専用リポジトリの `.gitattributes` に `*.patch.part-* binary` を追加し、Gitの改行変換やフィルターで分割バイト列が変わらないようにします。
+### バイナリ保護と改行コード自動復元
+Patch Appはパッチ専用リポジトリの `.gitattributes` に `packages/** binary` および `*.patch.part-* binary` を設定し、Gitの改行変換（eol/autocrlf）やフィルターでパッチ分割バイト列および追加ファイル実体（Obsidianプラグインや各種ソースファイル）が変わらないように保護します。
+さらに会社側のパッケージ検証・読み込み時にも、Gitやダウンロードアーカイブによる改行コード正規化（CRLF↔LF）の差異を自動検知し、マニフェスト記載のハッシュに合致するよう透過的に元のバイト列を復元して配置する耐性機構を備えています。
 
 ## package-index.json
 

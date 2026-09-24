@@ -4,6 +4,7 @@
 仕様:
 - SCHEMA_VERSION: パッケージ仕様バージョン
 - split_patch: 指定サイズごとのバイナリパッチ分割処理
+- resolve_added_file_content: 改行コード変換（CRLF↔LF）差異を透過的に検知・元バイト列復元するファイル検証処理
 - PatchArchive: パッチZIPの安全な検証・展開・再構築および追加ファイル読み込み
 - create_release_bundle: 今回公開されたパッチのみを含む配布用軽量ZIPアーカイブの生成
 """
@@ -93,6 +94,27 @@ def split_patch(data: bytes, target_dir: Path, chunk_size: int) -> list[dict[str
         (target_dir / name).write_bytes(value)
         chunks.append({"name": name, "size": len(value), "sha256": sha256_bytes(value)})
     return chunks
+
+
+def resolve_added_file_content(
+    content: bytes, expected_size: int, expected_sha256: str
+) -> bytes | None:
+    """
+    追加ファイルの生バイト列を検証し、期待ハッシュに一致するバイト列を返す。
+    Gitの自動改行コード正規化（eol/autocrlf）やアーカイブ生成時等で CRLF ↔ LF 変換が生じた場合でも、
+    透過的に検知して元の期待バイト列を復元する。
+    """
+    if len(content) == expected_size and sha256_bytes(content) == expected_sha256:
+        return content
+    # LF -> CRLF 変換の検証（元ファイルがCRLFでアーカイブ内がLFの場合）
+    crlf_candidate = content.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    if len(crlf_candidate) == expected_size and sha256_bytes(crlf_candidate) == expected_sha256:
+        return crlf_candidate
+    # CRLF -> LF 変換の検証（元ファイルがLFでアーカイブ内がCRLFの場合）
+    lf_candidate = content.replace(b"\r\n", b"\n")
+    if len(lf_candidate) == expected_size and sha256_bytes(lf_candidate) == expected_sha256:
+        return lf_candidate
+    return None
 
 
 @dataclass
@@ -235,14 +257,26 @@ class PatchArchive:
             safe_path = str(safe_relative_path(raw_path))
             archive_name = self.root_prefix + str(base / "added_files" / safe_path)
             content = self._read_limited(archive_name, 500 * 1024 * 1024)
-            if len(content) != int(record.get("size", -1)) or sha256_bytes(content) != record.get("sha256"):
+            resolved = resolve_added_file_content(
+                content, int(record.get("size", -1)), str(record.get("sha256", ""))
+            )
+            if resolved is None:
                 raise PackageValidationError(f"追加ファイルが破損しています: {safe_path}")
 
     def read_added_file(self, package: ArchivePackage, relative_path: str) -> bytes:
         base = PurePosixPath(package.manifest_path).parent
         safe_path = str(safe_relative_path(relative_path))
         archive_name = self.root_prefix + str(base / "added_files" / safe_path)
-        return self._read_limited(archive_name, 500 * 1024 * 1024)
+        content = self._read_limited(archive_name, 500 * 1024 * 1024)
+        for record in package.manifest.get("added_files") or []:
+            if isinstance(record, dict) and str(safe_relative_path(str(record.get("path", "")))) == safe_path:
+                resolved = resolve_added_file_content(
+                    content, int(record.get("size", -1)), str(record.get("sha256", ""))
+                )
+                if resolved is not None:
+                    return resolved
+                break
+        return content
 
     def package_groups(self) -> dict[str, list[ArchivePackage]]:
         result: dict[str, list[ArchivePackage]] = {}

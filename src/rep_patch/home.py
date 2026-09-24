@@ -7,7 +7,7 @@
 - delete_repository: 登録済みリポジトリを設定から削除
 - update_repository: リポジトリのブランチや初期導入地点、有効無効状態を更新
 - scan_repositories: 登録済みリポジトリの未公開コミット数やクリーン状態を取得
-- publish: 登録済みで有効なリポジトリの差分パッチ作成・新規ファイル実体同梱・削除記録・署名・分割、過去パッチ自動クリーンアップ（リポジトリ軽量化）、パッチリポジトリへpush、今回分軽量ZIPの生成およびGitHub Releases自動公開
+- publish: 登録済みで有効なリポジトリの差分パッチ作成・新規ファイル実体同梱・削除記録・署名・分割、パッチリポジトリの.gitattributesバイナリ保護、過去パッチ自動クリーンアップ（リポジトリ軽量化）、パッチリポジトリへpush、今回分軽量ZIPの生成およびGitHub Releases自動公開
 - reset_repository_patches: 指定リポジトリのパッチ専用リポジトリ内パッケージ削除・インデックス再署名・pushおよび公開済みコミット・連番の初期化
 """
 from __future__ import annotations
@@ -247,18 +247,25 @@ def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool
         raise RepPatchError("パッチ専用リポジトリに未コミットの変更があります")
     _push_pending(patch_root)
     attributes_path = patch_root / ".gitattributes"
-    binary_rule = "*.patch.part-* binary"
+    required_rules = [
+        "*.patch.part-* binary",
+        "packages/** binary",
+    ]
     if attributes_path.exists():
         attributes = attributes_path.read_text(encoding="utf-8")
-        if binary_rule not in attributes.splitlines():
+        lines = attributes.splitlines()
+        missing = [r for r in required_rules if r not in lines]
+        if missing:
             attributes_path.write_text(
-                attributes.rstrip("\n") + f"\n{binary_rule}\n", encoding="utf-8"
+                attributes.rstrip("\n") + "\n" + "\n".join(missing) + "\n",
+                encoding="utf-8",
             )
     else:
         attributes_path.write_text(
             "# Managed by Myao Patch Bridge\n"
-            f"{binary_rule}\n"
-            "*.json text eol=lf\n",
+            "*.json text eol=lf\n"
+            + "\n".join(required_rules)
+            + "\n",
             encoding="utf-8",
         )
     index_path = patch_root / "package-index.json"
