@@ -108,7 +108,7 @@ class SettingsStore:
             base = Settings()
         else:
             try:
-                base = Settings.from_dict(json.loads(self.path.read_text(encoding="utf-8")))
+                base = Settings.from_dict(json.loads(self.path.read_text(encoding="utf-8-sig")))
             except (OSError, ValueError, TypeError) as exc:
                 raise RepPatchError(f"設定ファイルを読み込めません: {exc}") from exc
         if self.overrides:

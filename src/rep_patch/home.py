@@ -187,7 +187,7 @@ def _reconcile_published(settings: Settings, store: SettingsStore, index: dict[s
         manifest_path = patch_root / item["manifest_path"]
         if not manifest_path.exists():
             continue
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         repo_id = manifest["repo_id"]
         if repo_id not in latest or manifest["sequence"] > latest[repo_id]["sequence"]:
             latest[repo_id] = manifest

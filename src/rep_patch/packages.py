@@ -46,7 +46,7 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 
 def read_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PackageValidationError(f"JSONを読み込めません: {path}: {exc}") from exc
     if not isinstance(value, dict):
@@ -175,7 +175,7 @@ class PatchArchive:
         name = candidates[0]
         raw = self._read_limited(name, MAX_JSON_BYTES)
         try:
-            index = json.loads(raw.decode("utf-8"))
+            index = json.loads(raw.decode("utf-8-sig"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PackageValidationError(f"package-index.jsonが不正です: {exc}") from exc
         if not isinstance(index, dict):
@@ -193,7 +193,7 @@ class PatchArchive:
             relative = str(safe_relative_path(str(item.get("manifest_path", ""))))
             raw = self._read_limited(self.root_prefix + relative, MAX_JSON_BYTES)
             try:
-                manifest = json.loads(raw.decode("utf-8"))
+                manifest = json.loads(raw.decode("utf-8-sig"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise PackageValidationError(f"マニフェストが不正です: {relative}: {exc}") from exc
             if not isinstance(manifest, dict):
