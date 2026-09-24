@@ -8,6 +8,7 @@
 - test_is_allowed_client_ip_loopback: ループバックアドレスの接続許可検証
 - test_is_allowed_client_ip_vpn_and_private: VPNおよびプライベートネットワークIPの接続許可・拒否検証
 - test_is_allowed_client_ip_public_rejected: パブリックIPおよび不正文字列の接続拒否検証
+- test_read_json_and_settings_with_utf8_bom: Windows環境等のBOM付きUTF-8 JSONが安全に読み込めることの検証
 """
 from __future__ import annotations
 
@@ -79,4 +80,29 @@ def test_is_allowed_client_ip_vpn_and_private(host: str) -> None:
 def test_is_allowed_client_ip_public_rejected(host: str) -> None:
     assert is_allowed_client_ip(host, allow_vpn=False) is False
     assert is_allowed_client_ip(host, allow_vpn=True) is False
+
+
+def test_read_json_and_settings_with_utf8_bom(tmp_path) -> None:
+    """
+    Windowsのメモ帳等で保存されたBOM付きUTF-8のJSONファイル（設定ファイルやマニフェスト）が
+    エラーにならず安全にデコード・読み込めることの検証
+    """
+    from rep_patch.config import SettingsStore
+    from rep_patch.packages import read_json
+
+    # 1. read_json with BOM
+    json_path = tmp_path / "bom_sample.json"
+    bom_content = b"\xef\xbb\xbf{\"hello\": \"world\", \"number\": 123}\n"
+    json_path.write_bytes(bom_content)
+    data = read_json(json_path)
+    assert data == {"hello": "world", "number": 123}
+
+    # 2. SettingsStore.load with BOM
+    settings_path = tmp_path / "settings.local.json"
+    settings_bom = b"\xef\xbb\xbf{\"mode\": \"company\", \"patch_password\": \"abc\"}\n"
+    settings_path.write_bytes(settings_bom)
+    store = SettingsStore(settings_path)
+    settings = store.load()
+    assert settings.mode == "company"
+    assert settings.patch_password == "abc"
 
