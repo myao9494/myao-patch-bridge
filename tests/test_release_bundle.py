@@ -8,7 +8,6 @@
 - 会社側モジュール（PatchArchive）でそのZIPを開き、正常に検証・読み込みできること
 """
 from pathlib import Path
-import tempfile
 import zipfile
 
 from rep_patch.packages import (

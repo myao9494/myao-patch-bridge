@@ -3,20 +3,18 @@
 
 仕様:
 - verify_clean_repository:
-  1. Git管理対象ファイルのみを展開したクリーン環境（一時ディレクトリ）を構築
+  1. 対象コミットのGit追跡ファイル（会社へ届くファイル）だけを基準に検証する
   2. ローカルに存在する重要設定ファイルが .gitignore 等でGit管理から漏れている場合、ファイル欠落エラーを検知
   3. Git管理対象に正しく含まれている場合は検証合格（valid=True）を返却
   4. .example / .sample / .template 等のテンプレートファイルがGit管理に含まれている場合、実ファイル欠落を許容（エラーとしない）
   5. ignore_patterns（除外パターン）に一致するファイルは検証から除外
-  6. 直前コミットからのパッチ生成および模擬適用がクリーン環境で正常に完了することを検証
+  6. 直前コミットからの差分が公開・適用できる形（祖先関係、サブモジュールなし）であることを検証
+  7. キャッシュ・ログ・ロックファイルなどのノイズは欠落として扱わない
 """
 from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Any
-
-import pytest
 
 from rep_patch.verifier import verify_clean_repository
 
@@ -80,8 +78,8 @@ def test_verify_clean_repository_success_when_tracked(tmp_path: Path) -> None:
     assert "data/config.json" in result["checked_files"]
 
 
-def test_verify_clean_repository_with_baseline_patch_simulation(tmp_path: Path) -> None:
-    """直前コミット（baseline）からの差分適用シミュレーションが成功すること"""
+def test_verify_clean_repository_with_baseline_diff_check(tmp_path: Path) -> None:
+    """直前コミット（baseline）からの差分が公開できる形であれば合格すること"""
     repo = tmp_path / "app_repo"
     _init_git_repo(repo)
 
@@ -191,3 +189,107 @@ def test_verify_clean_repository_with_custom_ignore_patterns(tmp_path: Path) -> 
     assert len(res_ignored["errors"]) == 0
 
 
+def _commit(repo: Path, message: str) -> str:
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", message], cwd=repo, check=True, capture_output=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_verify_reports_baseline_that_is_not_an_ancestor(tmp_path: Path) -> None:
+    """直前の公開地点が固定ブランチの履歴に無い（リベース等）場合、公開前にエラーとして検知する"""
+    repo = tmp_path / "app_repo"
+    _init_git_repo(repo)
+    (repo / "main.py").write_text("v1", encoding="utf-8")
+    _commit(repo, "v1")
+    subprocess.run(["git", "checkout", "-b", "side"], cwd=repo, check=True, capture_output=True)
+    (repo / "side.py").write_text("side", encoding="utf-8")
+    side = _commit(repo, "side")
+    subprocess.run(["git", "checkout", "main"], cwd=repo, check=True, capture_output=True)
+    (repo / "main.py").write_text("v2", encoding="utf-8")
+    _commit(repo, "v2")
+
+    result = verify_clean_repository(repo, branch="main", baseline_commit=side)
+
+    assert result["valid"] is False
+    assert any("祖先ではない" in err for err in result["errors"])
+
+
+def test_verify_reports_submodule_in_diff(tmp_path: Path) -> None:
+    inner = tmp_path / "inner"
+    _init_git_repo(inner)
+    (inner / "lib.py").write_text("lib", encoding="utf-8")
+    _commit(inner, "lib")
+
+    repo = tmp_path / "app_repo"
+    _init_git_repo(repo)
+    (repo / "main.py").write_text("v1", encoding="utf-8")
+    base = _commit(repo, "v1")
+    subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "submodule", "add", str(inner), "vendor/inner"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    _commit(repo, "add submodule")
+
+    result = verify_clean_repository(repo, branch="main", baseline_commit=base)
+
+    assert result["valid"] is False
+    assert any("サブモジュール" in err and "vendor/inner" in err for err in result["errors"])
+
+
+def test_verify_ignores_noise_and_reports_only_config_files(tmp_path: Path) -> None:
+    repo = tmp_path / "app_repo"
+    _init_git_repo(repo)
+    (repo / "main.py").write_text("print('ok')", encoding="utf-8")
+    _commit(repo, "init")
+
+    noise = [
+        "node_modules/pkg/package.json",
+        ".venv/pyvenv.cfg",
+        ".cache/state.json",
+        "backup/old.json",
+        "app.log",
+        "session_state.json",
+        "package-lock.json",
+        "notes.md",
+        "data.bin",
+    ]
+    for name in noise:
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text("x", encoding="utf-8")
+    assert verify_clean_repository(repo, branch="main")["valid"] is True
+
+    (repo / "conf").mkdir()
+    (repo / "conf" / "settings.yaml").write_text("a: 1", encoding="utf-8")
+    result = verify_clean_repository(repo, branch="main")
+    assert result["valid"] is False
+    assert len(result["errors"]) == 1 and "conf/settings.yaml" in result["errors"][0]
+
+
+def test_verify_uses_fixed_branch_not_the_checked_out_one(tmp_path: Path) -> None:
+    """検証対象は固定ブランチの内容であり、作業中の別ブランチにだけあるファイルは「届かない」と判定する"""
+    repo = tmp_path / "app_repo"
+    _init_git_repo(repo)
+    (repo / "main.py").write_text("print('ok')", encoding="utf-8")
+    _commit(repo, "init")
+    subprocess.run(["git", "checkout", "-b", "wip"], cwd=repo, check=True, capture_output=True)
+    (repo / "config.json").write_text("{}", encoding="utf-8")
+    _commit(repo, "config on wip only")
+
+    assert verify_clean_repository(repo, branch="wip")["valid"] is True
+    assert verify_clean_repository(repo, branch="main")["valid"] is False
+
+
+def test_verify_all_repositories_reports_broken_repository(tmp_path: Path) -> None:
+    from rep_patch.config import RepositoryConfig
+    from rep_patch.verifier import verify_all_repositories
+
+    summary = verify_all_repositories(
+        {"gone": RepositoryConfig(repo_id="gone", display_name="Gone", path=str(tmp_path / "not_exist"))}
+    )
+    assert summary["all_valid"] is False
+    assert summary["total_errors"] == 1
+    assert summary["results"]["gone"]["repo_id"] == "gone"

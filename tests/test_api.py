@@ -12,22 +12,27 @@ APIエンドポイントおよびPWA配信セキュリティのテスト
 - test_home_api_reset_repository: 自宅側リポジトリパッチ履歴リセットAPI（POST /api/repositories/{repo_id}/reset）の検証
 - test_api_listen_host_update: 待受ホスト（listen_host）の更新とバリデーション検証
 - test_api_vpn_access_permission: listen_hostに応じたVPN/プライベートIPおよびパブリックIPのアクセス制御検証
-- test_settings_store_overrides: SettingsStoreの引数オーバーライドの検証
+- test_settings_store_overrides: SettingsStoreの起動引数オーバーライド（実行時のみ有効）の検証
 - test_detect_tailscale_dns_name: Tailscale MagicDNS検出処理の検証
+- test_api_verify_repository / test_api_publish_blocked_by_verification_error / test_api_verify_with_clean_verify_ignore_patterns: 会社環境シミュレーション検証APIと公開前ガードの検証
+- test_api_rejects_foreign_host_header: 無関係なドメイン名を指すHostヘッダー（DNSリバインディング）の遮断検証
+- test_api_company_apply_flow: ZIP一覧・検証・一括適用・個別適用APIの通し検証（旧画面が送る correction 指定は無視）
+- test_api_diagnostics: 環境診断APIが全項目成功を返す検証
+- test_api_publish_requires_home_mode: 会社モードでは公開APIを拒否する検証
 """
 from __future__ import annotations
 
 import subprocess
-from fastapi.testclient import TestClient
 
+import pytest
 
-from rep_patch.api import create_app
-from rep_patch.config import SettingsStore
+from helpers import auth_headers, commit_all, init_repo, make_client, make_patch_repo
+from rep_patch.config import RepositoryConfig, Settings, SettingsStore
 
 
 def test_api_requires_session_token_for_mutation(tmp_path) -> None:
     store = SettingsStore(tmp_path / "settings.local.json")
-    client = TestClient(create_app(store))
+    client = make_client(store)
     assert client.get("/api/health").status_code == 200
     assert client.put("/api/settings", json={"values": {"mode": "home"}}).status_code == 403
     token = client.get("/api/session").json()["token"]
@@ -65,7 +70,7 @@ def test_api_requires_session_token_for_mutation(tmp_path) -> None:
 
 
 def test_pwa_is_served_with_local_only_security_headers(tmp_path) -> None:
-    client = TestClient(create_app(SettingsStore(tmp_path / "settings.local.json")))
+    client = make_client(SettingsStore(tmp_path / "settings.local.json"))
     response = client.get("/")
     assert response.status_code == 200
     assert "Myao Patch Bridge" in response.text
@@ -86,7 +91,7 @@ def test_company_api_repositories_and_commit(tmp_path, git_helpers) -> None:
 
     store = SettingsStore(tmp_path / "settings.local.json")
     store.update({"mode": "company", "company_apps_root": str(company_root)})
-    client = TestClient(create_app(store))
+    client = make_client(store)
 
     # 一覧取得
     res = client.get("/api/company/repositories")
@@ -123,7 +128,7 @@ def test_company_api_init_sequence(tmp_path, git_helpers) -> None:
 
     store = SettingsStore(tmp_path / "settings.local.json")
     store.update({"mode": "company", "company_apps_root": str(company_root)})
-    client = TestClient(create_app(store))
+    client = make_client(store)
 
     token = client.get("/api/session").json()["token"]
 
@@ -164,7 +169,7 @@ def test_company_api_init_sequence(tmp_path, git_helpers) -> None:
 def test_api_open_vscode(tmp_path, monkeypatch) -> None:
     """VS Code起動APIのテスト（正常系・存在しないパス・VS Code未検出）"""
     store = SettingsStore(tmp_path / "settings.local.json")
-    client = TestClient(create_app(store))
+    client = make_client(store)
     token = client.get("/api/session").json()["token"]
 
     target_dir = tmp_path / "sample-app"
@@ -218,7 +223,7 @@ def test_api_open_vscode(tmp_path, monkeypatch) -> None:
 def test_api_open_antigravity(tmp_path, monkeypatch) -> None:
     """Antigravity起動APIのテスト（正常系・存在しないパス・Antigravity未検出）"""
     store = SettingsStore(tmp_path / "settings.local.json")
-    client = TestClient(create_app(store))
+    client = make_client(store)
     token = client.get("/api/session").json()["token"]
 
     target_dir = tmp_path / "sample-app"
@@ -260,9 +265,8 @@ def test_api_open_antigravity(tmp_path, monkeypatch) -> None:
 
     # 3. 異常系: Antigravity がインストールされていない
     monkeypatch.setattr(shutil, "which", lambda cmd: None)
-    # パス直接指定のフォールバックも存在しない前提にするため、Path.is_file/is_dirなどもモックするか、探索関数内で制御
-    # ここでは api 側で shutil.which や候補パスが見つからない場合に RepPatchError を送出することを想定
-    monkeypatch.setattr("rep_patch.api._find_antigravity_executable", lambda: None)
+    # 既知のインストール先へのフォールバックも見つからない状態にする
+    monkeypatch.setattr("rep_patch.editors.find_antigravity_command", lambda: None)
     res_no_app = client.post(
         "/api/open-antigravity",
         json={"path": str(target_dir)},
@@ -289,7 +293,7 @@ def test_company_api_delete_repository(tmp_path, git_helpers) -> None:
 
     store = SettingsStore(tmp_path / "settings.local.json")
     store.update({"mode": "company", "company_apps_root": str(company_root)})
-    client = TestClient(create_app(store))
+    client = make_client(store)
 
     # 初期状態で2つのリポジトリが検出される
     res = client.get("/api/company/repositories")
@@ -380,7 +384,7 @@ def test_home_api_reset_repository(tmp_path, git_helpers) -> None:
     assert (patch_repo / "packages" / "sample-app" / "000001").exists()
     assert store.load().repositories["sample-app"].published_commit != ""
 
-    client = TestClient(create_app(store))
+    client = make_client(store)
 
     # トークンなしのリセット要求は403
     res_no_token = client.post("/api/repositories/sample-app/reset", json={})
@@ -403,7 +407,7 @@ def test_home_api_reset_repository(tmp_path, git_helpers) -> None:
 
 def test_api_listen_host_update(tmp_path) -> None:
     store = SettingsStore(tmp_path / "settings.local.json")
-    client = TestClient(create_app(store))
+    client = make_client(store)
     token = client.get("/api/session").json()["token"]
 
     # 0.0.0.0 やプライベートIPへの更新が成功すること
@@ -437,35 +441,34 @@ def test_api_listen_host_update(tmp_path) -> None:
 
 def test_api_vpn_access_permission(tmp_path) -> None:
     store = SettingsStore(tmp_path / "settings.local.json")
-    app = create_app(store)
 
     # 1. デフォルト (listen_host="127.0.0.1") の場合
     # プライベートIP / VPN (192.168.1.50) からのアクセスは403
-    client_vpn = TestClient(app, client=("192.168.1.50", 50000))
-    res_blocked = client_vpn.get("/api/health")
-    assert res_blocked.status_code == 403
+    assert make_client(store, "192.168.1.50").get("/api/health").status_code == 403
 
     # 2. listen_host="0.0.0.0" の場合
     store.update({"listen_host": "0.0.0.0"})
-    app_vpn = create_app(store)
 
     # プライベートIPからのアクセスは200
-    client_vpn_allowed = TestClient(app_vpn, client=("192.168.1.50", 50000))
-    assert client_vpn_allowed.get("/api/health").status_code == 200
+    assert make_client(store, "192.168.1.50").get("/api/health").status_code == 200
 
     # Tailscale IP (100.64.0.5) からのアクセスも200
-    client_tailscale = TestClient(app_vpn, client=("100.64.0.5", 50000))
-    assert client_tailscale.get("/api/health").status_code == 200
+    assert make_client(store, "100.64.0.5").get("/api/health").status_code == 200
 
     # パブリックIP (8.8.8.8) からのアクセスは403で遮断
-    client_public = TestClient(app_vpn, client=("8.8.8.8", 50000))
-    assert client_public.get("/api/health").status_code == 403
+    assert make_client(store, "8.8.8.8").get("/api/health").status_code == 403
+
+    # 3. 起動引数（--allow-vpn 相当）で一時的に許可した場合も、保存済み設定を変えずに許可される
+    local_store = SettingsStore(tmp_path / "local-only.json")
+    assert make_client(local_store, "192.168.1.50").get("/api/health").status_code == 403
+    overridden = SettingsStore(tmp_path / "local-only.json", overrides={"listen_host": "0.0.0.0"})
+    assert make_client(overridden, "192.168.1.50").get("/api/health").status_code == 200
 
 
 def test_settings_store_overrides(tmp_path) -> None:
     path = tmp_path / "settings.local.json"
     store = SettingsStore(path, overrides={"listen_host": "0.0.0.0", "listen_port": 18000})
-    settings = store.load()
+    settings = store.load_effective()
     assert settings.listen_host == "0.0.0.0"
     assert settings.listen_port == 18000
 
@@ -507,7 +510,7 @@ def test_api_verify_repository(tmp_path) -> None:
     settings.repositories["my_repo"] = RepositoryConfig(repo_id="my_repo", display_name="My Repo", path=str(repo))
     store.save(settings)
 
-    client = TestClient(create_app(store))
+    client = make_client(store)
     token = client.get("/api/session").json()["token"]
 
     # 単一リポジトリ検証
@@ -575,7 +578,7 @@ def test_api_publish_blocked_by_verification_error(tmp_path) -> None:
     )
     store.save(settings)
 
-    client = TestClient(create_app(store))
+    client = make_client(store)
     token = client.get("/api/session").json()["token"]
 
     # 検証なし指定でない場合、検証エラーで公開が失敗すること
@@ -618,7 +621,7 @@ def test_api_verify_with_clean_verify_ignore_patterns(tmp_path) -> None:
     )
     store.save(settings)
 
-    client = TestClient(create_app(store))
+    client = make_client(store)
     token = client.get("/api/session").json()["token"]
 
     res = client.post("/api/repositories/app_repo/verify", headers={"X-Rep-Patch-Token": token})
@@ -628,10 +631,132 @@ def test_api_verify_with_clean_verify_ignore_patterns(tmp_path) -> None:
     assert len(data["errors"]) == 0
 
 
+def test_api_rejects_foreign_host_header(tmp_path) -> None:
+    """悪意あるWebページが自分のドメインをこのPCへ向け直しても、APIもトークンも渡さない"""
+    store = SettingsStore(tmp_path / "settings.local.json")
+    client = make_client(store)
+
+    for host in ("127.0.0.1:17345", "localhost:17345", "[::1]:17345"):
+        assert client.get("/api/session", headers={"Host": host}).status_code == 200
+
+    blocked = client.get("/api/session", headers={"Host": "attacker.example.com:17345"})
+    assert blocked.status_code == 403
+    assert "token" not in blocked.json()
+    assert client.get("/", headers={"Host": "attacker.example.com"}).status_code == 403
+
+    # 待受ホストとして設定した名前、VPN許可時のTailscale名は通す
+    store.update({"listen_host": "pc123.corp.example.com"})
+    assert client.get("/api/health", headers={"Host": "pc123.corp.example.com:17345"}).status_code == 200
+    assert client.get("/api/health", headers={"Host": "my-pc.tail1234.ts.net:17345"}).status_code == 200
+    assert client.get("/api/health", headers={"Host": "attacker.example.com"}).status_code == 403
 
 
+def test_api_company_apply_flow(tmp_path) -> None:
+    patch_repo = make_patch_repo(tmp_path)
+    source = init_repo(tmp_path / "source" / "sample-app")
+    (source / "app.txt").write_text("v1\n", encoding="utf-8")
+    baseline = commit_all(source, "v1")
+    (source / "app.txt").write_text("v2\n", encoding="utf-8")
+    commit_all(source, "v2")
+    downloads = tmp_path / "downloads"
+
+    home_store = SettingsStore(tmp_path / "home.json")
+    home_store.save(
+        Settings(
+            mode="home",
+            patch_repo=str(patch_repo),
+            patch_password="shared-password",
+            download_dir=str(downloads),
+            repositories={
+                "sample-app": RepositoryConfig(
+                    repo_id="sample-app", display_name="sample-app", path=str(source), baseline_commit=baseline
+                )
+            },
+        )
+    )
+    home_client = make_client(home_store)
+    published = home_client.post("/api/home/publish", json={}, headers=auth_headers(home_client))
+    assert published.status_code == 200
+    assert published.json()["published"] is True
+    assert published.json()["bundle_error"] == ""
+
+    company = init_repo(tmp_path / "company-apps" / "sample-app")
+    (company / "app.txt").write_text("v1\n", encoding="utf-8")
+    commit_all(company, "company base")
+    company_store = SettingsStore(tmp_path / "company.json")
+    company_store.save(
+        Settings(
+            mode="company",
+            company_apps_root=str(tmp_path / "company-apps"),
+            patch_password="shared-password",
+            download_dir=str(downloads),
+        )
+    )
+    client = make_client(company_store)
+    headers = auth_headers(client)
+
+    packages = client.get("/api/company/downloads").json()["packages"]
+    assert [item["name"] for item in packages] == [published.json()["bundle_name"]]
+    zip_path = packages[0]["path"]
+
+    inspected = client.post("/api/company/inspect", json={"zip_path": zip_path}, headers=headers)
+    assert inspected.status_code == 200
+    assert inspected.json()["repositories"][0]["company_path"] == str(company)
+
+    # 旧バージョンの画面が送っていた correction 指定は受け取るが、動作は通常の適用と同じ
+    applied = client.post(
+        "/api/company/apply-all", json={"zip_path": zip_path, "correction": True}, headers=headers
+    )
+    assert applied.status_code == 200
+    assert applied.json()["failed"] == 0
+    assert (company / "app.txt").read_text(encoding="utf-8") == "v2\n"
+
+    retried = client.post(
+        "/api/company/retry", json={"zip_path": zip_path, "repo_id": "sample-app"}, headers=headers
+    )
+    assert retried.json()["results"][0]["status"] == "unchanged"
+
+    # パスワードが違えば検証の時点で拒否される
+    company_store.update({"patch_password": "wrong-password"})
+    rejected = client.post("/api/company/inspect", json={"zip_path": zip_path}, headers=headers)
+    assert rejected.status_code == 400
+    assert "パスワードが異なる" in rejected.json()["detail"]
 
 
+def test_api_diagnostics(tmp_path) -> None:
+    store = SettingsStore(tmp_path / "settings.local.json")
+    store.save(Settings(mode="company", download_dir=str(tmp_path / "downloads")))
+    result = make_client(store).get("/api/diagnostics").json()
+
+    assert result["passed"] is True, result["checks"]
+    assert [item["name"] for item in result["checks"]] == [
+        "Python",
+        "64-bit環境",
+        "Git",
+        "Downloads書き込み",
+        "ローカルポート",
+        "Git同期互換性",
+    ]
+
+    # 待受ホストがホスト名（MagicDNS等）でも、ポート診断は失敗扱いにならない
+    store.update({"listen_host": "my-pc.tail1234.ts.net"})
+    client = make_client(store)
+    checks = {item["name"]: item for item in client.get("/api/diagnostics").json()["checks"]}
+    assert checks["ローカルポート"]["status"] == "ok"
+
+    # 書き込めないダウンロードフォルダは失敗として報告される
+    (tmp_path / "blocked").write_text("file, not a directory", encoding="utf-8")
+    store.update({"download_dir": str(tmp_path / "blocked" / "sub")})
+    result = client.get("/api/diagnostics").json()
+    assert result["passed"] is False
+    assert {item["name"] for item in result["checks"] if item["status"] == "failed"} == {"Downloads書き込み"}
 
 
-
+@pytest.mark.parametrize("mode", ["company"])
+def test_api_publish_requires_home_mode(tmp_path, mode: str) -> None:
+    store = SettingsStore(tmp_path / "settings.local.json")
+    store.save(Settings(mode=mode, patch_password="pw"))
+    client = make_client(store)
+    response = client.post("/api/home/publish", json={}, headers=auth_headers(client))
+    assert response.status_code == 400
+    assert "自宅モード" in response.json()["detail"]

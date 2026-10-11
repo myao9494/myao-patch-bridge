@@ -2,66 +2,86 @@
 自宅環境でのリポジトリ検出・登録・管理およびパッチ公開処理を行うモジュール
 
 仕様:
-- discover_repositories: apps_rootおよびobsidian_repoからGitリポジトリを自動検出し設定に登録
-- add_repository: 指定されたGitリポジトリのパスや設定を手動で登録
+- discover_repositories: apps_rootおよびobsidian_repoからGitリポジトリを自動検出し設定に登録（既存の設定は保持）
+- add_repository: 指定されたGitリポジトリのパスや設定を手動で登録（同じIDの既存登録は上書きしない）
 - delete_repository: 登録済みリポジトリを設定から削除
-- update_repository: リポジトリのブランチや初期導入地点、有効無効状態を更新
-- scan_repositories: 登録済みリポジトリの未公開コミット数やクリーン状態を取得
-- publish: 登録済みで有効なリポジトリの差分パッチ作成・新規ファイル実体同梱・削除記録・署名・分割、パッチリポジトリの.gitattributesバイナリ保護、過去パッチ自動クリーンアップ（リポジトリ軽量化）、パッチリポジトリへpush、今回分軽量ZIPの生成およびGitHub Releases自動公開
+- update_repository: リポジトリのブランチや初期導入地点、有効無効状態、検証の除外パターンを更新
+- scan_repositories: 登録済みリポジトリの未公開コミット数やクリーン状態を取得（リポジトリごとに並列）
+- publish: 有効なリポジトリの差分をパッケージ化してパッチ専用リポジトリへpushする
+  1. パッチ専用リポジトリがクリーンであることを確認し、前回push失敗分があればpush
+  2. 全リポジトリの差分範囲を確定（設定不備は何も書き出す前に検出）し、事前クリーン検証を実行
+  3. 差分パッチの分割、変更・新規ファイル実体の同梱、削除記録、マニフェスト署名
+  4. .gitattributesのバイナリ保護、過去パッチの削除（リポジトリ軽量化）、今回分だけのインデックス署名、コミット
+     （ここまでに失敗した場合は作りかけを破棄し、直前のコミットの状態へ戻す）
+  5. push成功後に公開済みコミットと連番を保存し、今回分軽量ZIPの生成とGitHub Releases自動公開を行う
 - reset_repository_patches: 指定リポジトリのパッチ専用リポジトリ内パッケージ削除・インデックス再署名・pushおよび公開済みコミット・連番の初期化
 """
 from __future__ import annotations
 
 import json
-import re
 import shutil
-from dataclasses import asdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import PROJECT_ROOT, RepositoryConfig, Settings, SettingsStore
+from .config import (
+    OBSIDIAN_REPO_ID,
+    PROJECT_ROOT,
+    REPOSITORY_KINDS,
+    RepositoryConfig,
+    Settings,
+    SettingsStore,
+    repo_id_for,
+)
 from .errors import RepPatchError
 from .github import create_github_release, get_repo_slug, upload_release_asset
 from .git import (
+    NETWORK_TIMEOUT_SECONDS,
     changed_paths,
     diff_file_status,
     ensure_repository,
     is_ancestor,
+    is_repository,
+    read_blobs,
     repository_status,
     resolve_commit,
     run_git,
     tracked_files,
 )
-from .packages import PACKAGE_TYPE, SCHEMA_VERSION, create_release_bundle, load_index, split_patch, write_json
+from .packages import (
+    INDEX_NAME,
+    SCHEMA_VERSION,
+    build_index,
+    create_release_bundle,
+    load_index,
+    package_dir,
+    split_patch,
+    write_json,
+)
 from .security import sha256_bytes, sign_document
-from .verifier import verify_clean_repository
+from .verifier import unsupported_diff_entries, verify_clean_repository
 
-
-def repo_id_for(name: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", name.strip()).strip("-.").lower()
-    if not slug:
-        raise RepPatchError(f"リポジトリIDを作成できません: {name}")
-    return slug
+# パッチ専用リポジトリの .gitattributes に必ず含めるバイナリ保護ルール
+PATCH_REPO_BINARY_RULES = ("*.patch.part-* binary", "packages/** binary")
+_SCAN_WORKERS = 8
 
 
 def discover_repositories(settings: Settings, store: SettingsStore) -> list[dict[str, Any]]:
     root = Path(settings.apps_root).expanduser()
     if not root.is_dir():
         raise RepPatchError(f"アプリルートが見つかりません: {root}")
-    existing = settings.repositories
-    discovered: dict[str, RepositoryConfig] = dict(existing)
+    obsidian = Path(settings.obsidian_repo).expanduser().resolve() if settings.obsidian_repo else None
+    discovered: dict[str, RepositoryConfig] = dict(settings.repositories)
     candidates = [item for item in root.iterdir() if item.is_dir()]
-    if settings.obsidian_repo:
+    if obsidian:
         candidates.append(Path(settings.obsidian_repo).expanduser())
     for path in candidates:
-        if path.resolve() == PROJECT_ROOT.resolve():
+        if path.resolve() == PROJECT_ROOT.resolve() or not is_repository(path):
             continue
-        result = run_git(path, ["rev-parse", "--is-inside-work-tree"], check=False)
-        if result.returncode != 0 or result.text != "true":
-            continue
-        kind = "obsidian" if settings.obsidian_repo and path.resolve() == Path(settings.obsidian_repo).expanduser().resolve() else "app"
-        repo_id = "obsidian-settings" if kind == "obsidian" else repo_id_for(path.name)
+        kind = "obsidian" if obsidian and path.resolve() == obsidian else "app"
+        repo_id = OBSIDIAN_REPO_ID if kind == "obsidian" else repo_id_for(path.name)
         if repo_id not in discovered:
             branch = run_git(path, ["rev-parse", "--abbrev-ref", "HEAD"]).text
             discovered[repo_id] = RepositoryConfig(
@@ -78,46 +98,65 @@ def discover_repositories(settings: Settings, store: SettingsStore) -> list[dict
     return scan_repositories(settings)
 
 
+def _scan_repository(config: RepositoryConfig) -> dict[str, Any]:
+    item: dict[str, Any] = asdict(config)
+    try:
+        repo = Path(config.path)
+        status = repository_status(repo)
+        target = resolve_commit(repo, config.branch)
+        base = config.published_commit or config.baseline_commit
+        count = 0
+        if base:
+            count = int(run_git(repo, ["rev-list", "--count", f"{base}..{target}"]).text)
+        item.update(status)
+        item.update({"target_commit": target, "unpublished_commits": count, "error": ""})
+    except (RepPatchError, ValueError) as exc:
+        item.update({"clean": False, "error": str(exc), "unpublished_commits": 0})
+    return item
+
+
 def scan_repositories(settings: Settings) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for config in sorted(settings.repositories.values(), key=lambda item: item.display_name.lower()):
-        item: dict[str, Any] = asdict(config)
-        try:
-            status = repository_status(Path(config.path))
-            target = resolve_commit(Path(config.path), config.branch)
-            base = config.published_commit or config.baseline_commit
-            count = 0
-            if base:
-                count_text = run_git(Path(config.path), ["rev-list", "--count", f"{base}..{target}"]).text
-                count = int(count_text)
-            item.update(status)
-            item.update({"target_commit": target, "unpublished_commits": count, "error": ""})
-        except (RepPatchError, ValueError) as exc:
-            item.update({"clean": False, "error": str(exc), "unpublished_commits": 0})
-        result.append(item)
-    return result
+    configs = sorted(settings.repositories.values(), key=lambda item: item.display_name.lower())
+    if not configs:
+        return []
+    with ThreadPoolExecutor(max_workers=min(_SCAN_WORKERS, len(configs))) as executor:
+        return list(executor.map(_scan_repository, configs))
+
+
+def _clean_patterns(value: Any) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise RepPatchError("検証の除外パターンは文字列の一覧で指定してください")
+    return [item.strip() for item in value if item.strip()]
 
 
 def add_repository(
     settings: Settings, store: SettingsStore, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    raw_path = payload.get("path", "").strip()
+    raw_path = (payload.get("path") or "").strip()
     if not raw_path:
         raise RepPatchError("リポジトリのパスを指定してください")
     path = Path(raw_path).expanduser().resolve()
     if not path.is_dir():
         raise RepPatchError(f"Gitリポジトリが見つかりません: {raw_path}")
-    result = run_git(path, ["rev-parse", "--is-inside-work-tree"], check=False)
-    if result.returncode != 0 or result.text != "true":
+    if not is_repository(path):
         raise RepPatchError(f"指定されたディレクトリはGitリポジトリではありません: {raw_path}")
 
     kind = payload.get("kind") or ("obsidian" if "obsidian" in path.name.lower() else "app")
-    display_name = payload.get("display_name", "").strip() or path.name
-    repo_id = payload.get("repo_id", "").strip() or (
-        "obsidian-settings" if kind == "obsidian" and path.name.lower().startswith("obsidian") else repo_id_for(display_name)
+    if kind not in REPOSITORY_KINDS:
+        raise RepPatchError("種類は app または obsidian で指定してください")
+    display_name = (payload.get("display_name") or "").strip() or path.name
+    repo_id = (payload.get("repo_id") or "").strip() or (
+        OBSIDIAN_REPO_ID if kind == "obsidian" and path.name.lower().startswith("obsidian") else repo_id_for(display_name)
     )
+    if repo_id in settings.repositories:
+        # 上書きすると公開済みコミットと連番の記録が失われ、次回のパッチが壊れる
+        existing = settings.repositories[repo_id]
+        raise RepPatchError(
+            f"同じID（{repo_id}）のリポジトリが既に登録されています: {existing.path}。"
+            "別の表示名を指定するか、既存のカードを削除してから追加してください"
+        )
 
-    branch = payload.get("branch", "").strip()
+    branch = (payload.get("branch") or "").strip()
     if not branch:
         branch_res = run_git(path, ["symbolic-ref", "--short", "HEAD"], check=False)
         if branch_res.returncode == 0 and branch_res.text:
@@ -126,21 +165,19 @@ def add_repository(
             abbrev_res = run_git(path, ["rev-parse", "--abbrev-ref", "HEAD"], check=False)
             branch = abbrev_res.text if abbrev_res.returncode == 0 and abbrev_res.text and abbrev_res.text != "HEAD" else "main"
 
-    baseline_commit = payload.get("baseline_commit", "").strip()
+    baseline_commit = (payload.get("baseline_commit") or "").strip()
     if baseline_commit:
         baseline_commit = resolve_commit(path, baseline_commit)
-
-    enabled = bool(payload.get("enabled", True))
 
     config = RepositoryConfig(
         repo_id=repo_id,
         display_name=display_name,
         path=str(path),
         kind=kind,
-        enabled=enabled,
+        enabled=bool(payload.get("enabled", True)),
         branch=branch,
         baseline_commit=baseline_commit,
-        clean_verify_ignore_patterns=list(payload.get("clean_verify_ignore_patterns", [])),
+        clean_verify_ignore_patterns=_clean_patterns(payload.get("clean_verify_ignore_patterns") or []),
     )
     settings.repositories[repo_id] = config
     store.save(settings)
@@ -163,17 +200,19 @@ def update_repository(
     if repo_id not in settings.repositories:
         raise RepPatchError(f"リポジトリが登録されていません: {repo_id}")
     config = settings.repositories[repo_id]
-    for key in [
-        "display_name",
-        "path",
-        "kind",
-        "enabled",
-        "branch",
-        "baseline_commit",
-        "clean_verify_ignore_patterns",
-    ]:
+    for key in ("display_name", "path", "kind", "branch", "baseline_commit"):
         if key in updates:
-            setattr(config, key, updates[key])
+            if not isinstance(updates[key], str):
+                raise RepPatchError(f"{key} は文字列で指定してください")
+            setattr(config, key, updates[key].strip())
+    if config.kind not in REPOSITORY_KINDS:
+        raise RepPatchError("種類は app または obsidian で指定してください")
+    if "enabled" in updates:
+        if not isinstance(updates["enabled"], bool):
+            raise RepPatchError("enabled は true または false で指定してください")
+        config.enabled = updates["enabled"]
+    if "clean_verify_ignore_patterns" in updates:
+        config.clean_verify_ignore_patterns = _clean_patterns(updates["clean_verify_ignore_patterns"])
     if config.baseline_commit:
         config.baseline_commit = resolve_commit(Path(config.path), config.baseline_commit)
     settings.repositories[repo_id] = config
@@ -182,6 +221,7 @@ def update_repository(
 
 
 def _reconcile_published(settings: Settings, store: SettingsStore, index: dict[str, Any], patch_root: Path) -> None:
+    """パッチ専用リポジトリに載っている最新パッチへ、自宅側設定の公開済みコミットを合わせる（push失敗後の復旧用）"""
     latest: dict[str, dict[str, Any]] = {}
     for item in index["packages"]:
         manifest_path = patch_root / item["manifest_path"]
@@ -201,60 +241,41 @@ def _reconcile_published(settings: Settings, store: SettingsStore, index: dict[s
         store.save(settings)
 
 
+def _push(patch_root: Path) -> None:
+    run_git(patch_root, ["push"], timeout=NETWORK_TIMEOUT_SECONDS)
+
+
 def _push_pending(patch_root: Path) -> None:
     upstream = run_git(patch_root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], check=False)
     if upstream.returncode != 0:
         return
     ahead = int(run_git(patch_root, ["rev-list", "--count", "@{u}..HEAD"]).text or "0")
     if ahead:
-        run_git(patch_root, ["push"])
+        _push(patch_root)
 
 
-def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool = False) -> dict[str, Any]:
-    if settings.mode != "home":
-        raise RepPatchError("パッチの公開は自宅モードでのみ実行できます")
-    if not settings.patch_password:
-        raise RepPatchError("パッチ検証用パスワードを設定してください")
-    patch_root = Path(settings.patch_repo).expanduser()
-    ensure_repository(patch_root)
-
-    # 公開前クリーン環境シミュレーション検証（会社側でのファイル不在エラー防止）
-    if not skip_verification:
-        for config in settings.repositories.values():
-            if not config.enabled:
-                continue
-            repo = Path(config.path)
-            ensure_repository(repo)
-            if not config.baseline_commit:
-                continue
-            target = resolve_commit(repo, config.branch)
-            source = config.published_commit or resolve_commit(repo, config.baseline_commit)
-            if source == target:
-                continue
-            verification = verify_clean_repository(
-                repo,
-                branch=config.branch,
-                baseline_commit=source,
-                ignore_patterns=config.clean_verify_ignore_patterns,
-            )
-            if not verification["valid"]:
-                err_msg = " / ".join(verification["errors"])
-                raise RepPatchError(
-                    f"会社環境検証（ファイル不在・整合性チェック）でエラーが検知されたため、パッチ公開を中断しました [{config.display_name}]: {err_msg}"
-                )
-
+def _ensure_patch_repo_clean(patch_root: Path) -> None:
     if run_git(patch_root, ["status", "--porcelain=v1"]).text:
         raise RepPatchError("パッチ専用リポジトリに未コミットの変更があります")
-    _push_pending(patch_root)
+
+
+def _restore_patch_worktree(patch_root: Path) -> None:
+    """
+    作りかけのパッケージを破棄し、パッチ専用リポジトリを直前のコミットの状態へ戻す。
+
+    呼び出し前に作業ツリーがクリーンであることを確認済みなので、消えるのは今回の公開処理が
+    書き出したファイルだけである。これを怠ると次回の公開が「未コミットの変更があります」で止まる。
+    """
+    run_git(patch_root, ["reset", "--hard", "HEAD"], check=False)
+    run_git(patch_root, ["clean", "-fd"], check=False)
+
+
+def _ensure_gitattributes(patch_root: Path) -> None:
+    """Gitの改行コード正規化でパッチ分割・同梱ファイル実体のバイト列が変わらないよう保護する"""
     attributes_path = patch_root / ".gitattributes"
-    required_rules = [
-        "*.patch.part-* binary",
-        "packages/** binary",
-    ]
     if attributes_path.exists():
         attributes = attributes_path.read_text(encoding="utf-8")
-        lines = attributes.splitlines()
-        missing = [r for r in required_rules if r not in lines]
+        missing = [rule for rule in PATCH_REPO_BINARY_RULES if rule not in attributes.splitlines()]
         if missing:
             attributes_path.write_text(
                 attributes.rstrip("\n") + "\n" + "\n".join(missing) + "\n",
@@ -264,22 +285,25 @@ def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool
         attributes_path.write_text(
             "# Managed by Myao Patch Bridge\n"
             "*.json text eol=lf\n"
-            + "\n".join(required_rules)
+            + "\n".join(PATCH_REPO_BINARY_RULES)
             + "\n",
             encoding="utf-8",
         )
-    index_path = patch_root / "package-index.json"
-    index = load_index(index_path, settings.patch_password)
-    _reconcile_published(settings, store, index, patch_root)
-    latest_sequence: dict[str, int] = {}
-    for repo_id, cfg in settings.repositories.items():
-        latest_sequence[repo_id] = cfg.last_sequence
-    for item in index["packages"]:
-        repo_id = item["repo_id"]
-        latest_sequence[repo_id] = max(latest_sequence.get(repo_id, 0), int(item["sequence"]))
 
-    created: list[dict[str, Any]] = []
-    timestamp = datetime.now(timezone.utc).isoformat()
+
+@dataclass
+class _PublishPlan:
+    """公開対象1リポジトリ分の差分範囲"""
+
+    config: RepositoryConfig
+    repo: Path
+    source: str
+    target: str
+
+
+def _plan_publish(settings: Settings) -> list[_PublishPlan]:
+    """有効なリポジトリの差分範囲を確定する。ここでは何も書き換えず、設定不備は書き出し前に検出する。"""
+    plans: list[_PublishPlan] = []
     for config in settings.repositories.values():
         if not config.enabled:
             continue
@@ -295,181 +319,268 @@ def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool
             raise RepPatchError(
                 f"公開済みコミットが {config.branch} の祖先ではありません: {config.display_name}"
             )
-        patch = run_git(
-            repo,
-            [
-                "diff",
-                "--binary",
-                "--full-index",
-                "--no-ext-diff",
-                "--src-prefix=a/",
-                "--dst-prefix=b/",
-                source,
-                target,
-                "--",
-            ],
-        ).stdout
-        if not patch:
-            continue
-        sequence = latest_sequence.get(config.repo_id, 0) + 1
-        relative_dir = Path("packages") / config.repo_id / f"{sequence:06d}"
-        target_dir = patch_root / relative_dir
-        chunks = split_patch(patch, target_dir, settings.chunk_size_mib * 1024 * 1024)
+        plans.append(_PublishPlan(config, repo, source, target))
+    return plans
 
-        diff_status = diff_file_status(repo, source, target)
-        added_records: list[dict[str, Any]] = []
-        added_files_dir = target_dir / "added_files"
-        files_to_bundle = sorted(set(diff_status["added"] + diff_status["modified"]))
-        for rel_path in files_to_bundle:
-            file_bytes = run_git(repo, ["show", f"{target}:{rel_path}"]).stdout
-            file_target = added_files_dir / rel_path
-            file_target.parent.mkdir(parents=True, exist_ok=True)
-            file_target.write_bytes(file_bytes)
-            added_records.append(
-                {
-                    "path": rel_path,
-                    "size": len(file_bytes),
-                    "sha256": sha256_bytes(file_bytes),
-                }
+
+def _verify_plans(plans: list[_PublishPlan]) -> None:
+    """公開前クリーン環境シミュレーション検証（会社側でのファイル不在エラー防止）"""
+    for plan in plans:
+        config = plan.config
+        verification = verify_clean_repository(
+            plan.repo,
+            branch=config.branch,
+            baseline_commit=plan.source,
+            ignore_patterns=config.clean_verify_ignore_patterns,
+            repo_id=config.repo_id,
+        )
+        if not verification["valid"]:
+            err_msg = " / ".join(verification["errors"])
+            raise RepPatchError(
+                f"会社環境検証（ファイル不在・整合性チェック）でエラーが検知されたため、パッチ公開を中断しました [{config.display_name}]: {err_msg}"
             )
 
 
-        manifest = sign_document(
+def _build_package(
+    plan: _PublishPlan,
+    patch_root: Path,
+    sequence: int,
+    timestamp: str,
+    settings: Settings,
+) -> dict[str, Any] | None:
+    """1リポジトリ分のパッケージをパッチ専用リポジトリへ書き出し、署名済みマニフェストを返す。差分が空ならNone。"""
+    config, repo, source, target = plan.config, plan.repo, plan.source, plan.target
+    patch = run_git(
+        repo,
+        [
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            source,
+            target,
+            "--",
+        ],
+    ).stdout
+    if not patch:
+        return None
+
+    target_entries = tracked_files(repo, target)
+    problems = unsupported_diff_entries(repo, source, target, target_entries)
+    if problems:
+        raise RepPatchError(f"{' / '.join(problems)} [{config.display_name}]")
+
+    relative_dir = package_dir(config.repo_id, sequence)
+    target_dir = patch_root.joinpath(*relative_dir.parts)
+    chunks = split_patch(patch, target_dir, settings.chunk_size_mib * 1024 * 1024)
+
+    # 新規追加・変更されたファイルの実体を同梱する（会社側はこれを直接上書き配置する）
+    diff_status = diff_file_status(repo, source, target)
+    blob_ids = {item["path"]: item["blob"] for item in target_entries}
+    bundle_paths = sorted(set(diff_status["added"] + diff_status["modified"]))
+    blobs = read_blobs(repo, [blob_ids[rel_path] for rel_path in bundle_paths])
+    added_records: list[dict[str, Any]] = []
+    added_files_dir = target_dir / "added_files"
+    for rel_path in bundle_paths:
+        file_bytes = blobs[blob_ids[rel_path]]
+        file_target = added_files_dir / rel_path
+        file_target.parent.mkdir(parents=True, exist_ok=True)
+        file_target.write_bytes(file_bytes)
+        added_records.append(
             {
-                "schema_version": SCHEMA_VERSION,
-                "repo_id": config.repo_id,
-                "display_name": config.display_name,
-                "kind": config.kind,
-                "sequence": sequence,
-                "created_at": timestamp,
-                "source_branch": config.branch,
-                "source_from_commit": source,
-                "source_to_commit": target,
-                "patch_size": len(patch),
-                "patch_sha256": sha256_bytes(patch),
-                "chunks": chunks,
-                "changed_paths": changed_paths(repo, source, target),
-                "added_files": added_records,
-                "deleted_files": diff_status["deleted"],
-                "target_files": tracked_files(repo, target),
-            },
-            settings.patch_password,
-        )
-        manifest_path = relative_dir / "manifest.json"
-        write_json(patch_root / manifest_path, manifest)
-        index["packages"].append(
-            {
-                "repo_id": config.repo_id,
-                "sequence": sequence,
-                "manifest_path": manifest_path.as_posix(),
+                "path": rel_path,
+                "size": len(file_bytes),
+                "sha256": sha256_bytes(file_bytes),
             }
         )
-        latest_sequence[config.repo_id] = sequence
-        created.append(manifest)
 
-    if not created:
-        return {"published": False, "message": "公開する変更はありません", "packages": []}
-
-    # ワーキングツリーの軽量化: 今回作成されたパッチ以外の過去ディレクトリを削除
-    packages_dir = patch_root / "packages"
-    keep_dirs = {packages_dir / m["repo_id"] / f"{m['sequence']:06d}" for m in created}
-    if packages_dir.exists():
-        for repo_dir in packages_dir.iterdir():
-            if not repo_dir.is_dir():
-                continue
-            for seq_dir in list(repo_dir.iterdir()):
-                if seq_dir.is_dir() and seq_dir not in keep_dirs:
-                    shutil.rmtree(seq_dir)
-            if not any(repo_dir.iterdir()):
-                repo_dir.rmdir()
-
-    # package-index.json を今回作成されたパッチのみで再構築
-    new_packages_entry = []
-    for manifest in created:
-        manifest_rel = f"packages/{manifest['repo_id']}/{manifest['sequence']:06d}/manifest.json"
-        new_packages_entry.append(
-            {
-                "repo_id": manifest["repo_id"],
-                "sequence": manifest["sequence"],
-                "manifest_path": manifest_rel,
-            }
-        )
-    signed_index = sign_document(
+    manifest = sign_document(
         {
             "schema_version": SCHEMA_VERSION,
-            "package_type": PACKAGE_TYPE,
-            "packages": new_packages_entry,
+            "repo_id": config.repo_id,
+            "display_name": config.display_name,
+            "kind": config.kind,
+            "sequence": sequence,
+            "created_at": timestamp,
+            "source_branch": config.branch,
+            "source_from_commit": source,
+            "source_to_commit": target,
+            "patch_size": len(patch),
+            "patch_sha256": sha256_bytes(patch),
+            "chunks": chunks,
+            "changed_paths": changed_paths(repo, source, target),
+            "added_files": added_records,
+            "deleted_files": diff_status["deleted"],
+            "target_files": target_entries,
         },
         settings.patch_password,
     )
-    write_json(index_path, signed_index)
+    write_json(target_dir / "manifest.json", manifest)
+    return manifest
 
-    run_git(patch_root, ["add", "-A"])
-    label = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    run_git(patch_root, ["commit", "-m", f"Publish patch package {label}"])
-    run_git(patch_root, ["push"])
+
+def _prune_old_packages(patch_root: Path, created: list[dict[str, Any]]) -> None:
+    """ワーキングツリーの軽量化: 今回作成されたパッチ以外の過去ディレクトリを削除"""
+    packages_dir = patch_root / "packages"
+    keep_dirs = {
+        patch_root.joinpath(*package_dir(m["repo_id"], m["sequence"]).parts) for m in created
+    }
+    if not packages_dir.exists():
+        return
+    for repo_dir in packages_dir.iterdir():
+        if not repo_dir.is_dir():
+            continue
+        for seq_dir in list(repo_dir.iterdir()):
+            if seq_dir.is_dir() and seq_dir not in keep_dirs:
+                shutil.rmtree(seq_dir)
+        if not any(repo_dir.iterdir()):
+            repo_dir.rmdir()
+
+
+def _bundle_output_dir(settings: Settings, patch_root: Path) -> Path:
+    if settings.download_dir:
+        return Path(settings.download_dir).expanduser()
+    # 出力先が未設定ならパッチ専用リポジトリ内の dist/ へ置く。次回公開時に未コミットの変更として
+    # 検出されないよう、このリポジトリだけの除外設定（コミットされない）へ登録しておく。
+    exclude_path = Path(run_git(patch_root, ["rev-parse", "--git-path", "info/exclude"]).text)
+    if not exclude_path.is_absolute():
+        exclude_path = patch_root / exclude_path
+    existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    if "/dist/" not in existing.splitlines():
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        prefix = existing.rstrip("\n") + "\n" if existing else ""
+        exclude_path.write_text(prefix + "/dist/\n", encoding="utf-8")
+    return patch_root / "dist"
+
+
+def _publish_github_release(
+    settings: Settings, patch_root: Path, bundle_path: Path, created: list[dict[str, Any]], label: str
+) -> dict[str, str]:
+    """GitHub Releases へ今回分ZIPを公開する。失敗しても公開処理全体は成功として扱い、理由を返す。"""
+    result = {"release_url": "", "download_url": "", "release_error": ""}
+    try:
+        repo_slug = get_repo_slug(patch_root, settings.github_repo)
+        tag_name = f"v{datetime.now(timezone.utc).strftime('%Y.%m.%d-%H%M%S')}"
+        body_lines = [f"- **{m.get('display_name', m['repo_id'])}**: #{m['sequence']:06d}" for m in created]
+        release_data = create_github_release(
+            token=settings.github_token,
+            repo_slug=repo_slug,
+            tag_name=tag_name,
+            name=f"Patch Release {label}",
+            body="Myao Patch Bridge 自動パッチ公開\n\n" + "\n".join(body_lines),
+        )
+        result["release_url"] = release_data.get("html_url", "")
+        upload_url = release_data.get("upload_url", "")
+        if upload_url:
+            asset_data = upload_release_asset(
+                token=settings.github_token,
+                upload_url=upload_url,
+                file_path=bundle_path,
+            )
+            result["download_url"] = asset_data.get("browser_download_url", "")
+    except Exception as exc:  # noqa: BLE001 - the patch itself is already published
+        result["release_error"] = str(exc)
+    return result
+
+
+def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool = False) -> dict[str, Any]:
+    if settings.mode != "home":
+        raise RepPatchError("パッチの公開は自宅モードでのみ実行できます")
+    if not settings.patch_password:
+        raise RepPatchError("パッチ検証用パスワードを設定してください")
+    patch_root = Path(settings.patch_repo).expanduser()
+    ensure_repository(patch_root)
+    _ensure_patch_repo_clean(patch_root)
+    _push_pending(patch_root)
+
+    index_path = patch_root / INDEX_NAME
+    index = load_index(index_path, settings.patch_password)
+    _reconcile_published(settings, store, index, patch_root)
+
+    plans = _plan_publish(settings)
+    if not skip_verification:
+        _verify_plans(plans)
+    nothing_to_publish = {"published": False, "message": "公開する変更はありません", "packages": []}
+    if not plans:
+        return nothing_to_publish
+
+    # 次の連番: 自宅側設定の記録と、パッチ専用リポジトリに残っている分の大きい方から続ける
+    latest_sequence = {repo_id: cfg.last_sequence for repo_id, cfg in settings.repositories.items()}
+    for item in index["packages"]:
+        repo_id = item["repo_id"]
+        latest_sequence[repo_id] = max(latest_sequence.get(repo_id, 0), int(item["sequence"]))
+
+    created: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    label = now.strftime("%Y-%m-%d")
+    try:
+        _ensure_gitattributes(patch_root)
+        for plan in plans:
+            sequence = latest_sequence.get(plan.config.repo_id, 0) + 1
+            manifest = _build_package(plan, patch_root, sequence, now.isoformat(), settings)
+            if manifest:
+                created.append(manifest)
+        if not created:
+            _restore_patch_worktree(patch_root)
+            return nothing_to_publish
+        _prune_old_packages(patch_root, created)
+        # package-index.json を今回作成されたパッチのみで再構築
+        write_json(index_path, build_index(created, settings.patch_password))
+        run_git(patch_root, ["add", "-A"])
+        run_git(patch_root, ["commit", "-m", f"Publish patch package {label}"])
+    except BaseException:
+        _restore_patch_worktree(patch_root)
+        raise
+    # ここで失敗してもコミットは残り、次回の公開時に先頭でpushを再試行する
+    _push(patch_root)
 
     # 自宅側設定の published_commit および last_sequence を更新・保存
     for manifest in created:
-        repo_id = manifest["repo_id"]
-        if repo_id in settings.repositories:
-            settings.repositories[repo_id].published_commit = manifest["source_to_commit"]
-            settings.repositories[repo_id].last_sequence = int(manifest["sequence"])
+        config = settings.repositories.get(manifest["repo_id"])
+        if config:
+            config.published_commit = manifest["source_to_commit"]
+            config.last_sequence = int(manifest["sequence"])
     store.save(settings)
 
-    # 配布用軽量ZIPの生成（今回作成されたパッチのみ同梱）
-    output_dir = Path(settings.download_dir).expanduser() if settings.download_dir else patch_root / "dist"
-    bundle_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-    bundle_name = f"myao_app_patch_{bundle_timestamp}.zip"
-    bundle_path = create_release_bundle(
-        patch_root=patch_root,
-        created_manifests=created,
-        password=settings.patch_password,
-        output_dir=output_dir,
-        bundle_name=bundle_name,
-    )
-
-    # GitHub Releases への自動公開（トークン設定時）
-    release_url = ""
-    download_url = ""
-    release_error = ""
-    if settings.github_token:
-        try:
-            repo_slug = get_repo_slug(patch_root, settings.github_repo)
-            tag_name = f"v{datetime.now(timezone.utc).strftime('%Y.%m.%d-%H%M%S')}"
-            rel_name = f"Patch Release {label}"
-            body_lines = [f"- **{m.get('display_name', m['repo_id'])}**: #{m['sequence']:06d}" for m in created]
-            rel_body = "Myao Patch Bridge 自動パッチ公開\n\n" + "\n".join(body_lines)
-            release_data = create_github_release(
-                token=settings.github_token,
-                repo_slug=repo_slug,
-                tag_name=tag_name,
-                name=rel_name,
-                body=rel_body,
-            )
-            release_url = release_data.get("html_url", "")
-            upload_url = release_data.get("upload_url", "")
-            if upload_url:
-                asset_data = upload_release_asset(
-                    token=settings.github_token,
-                    upload_url=upload_url,
-                    file_path=bundle_path,
-                )
-                download_url = asset_data.get("browser_download_url", "")
-        except Exception as exc:
-            release_error = str(exc)
-
-    return {
+    result: dict[str, Any] = {
         "published": True,
         "message": f"{len(created)}件のパッチを公開しました",
         "packages": created,
-        "bundle_path": str(bundle_path),
-        "bundle_name": bundle_path.name,
-        "bundle_size": bundle_path.stat().st_size,
-        "release_url": release_url,
-        "download_url": download_url,
-        "release_error": release_error,
+        "bundle_path": "",
+        "bundle_name": "",
+        "bundle_size": 0,
+        "bundle_error": "",
+        "release_url": "",
+        "download_url": "",
+        "release_error": "",
     }
+
+    # 配布用軽量ZIPの生成（今回作成されたパッチのみ同梱）。パッチ自体は公開済みなので失敗しても中断しない
+    try:
+        bundle_path = create_release_bundle(
+            patch_root=patch_root,
+            created_manifests=created,
+            password=settings.patch_password,
+            output_dir=_bundle_output_dir(settings, patch_root),
+            bundle_name=f"myao_app_patch_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}.zip",
+        )
+    except Exception as exc:  # noqa: BLE001
+        result["bundle_error"] = str(exc)
+        return result
+    result.update(
+        {
+            "bundle_path": str(bundle_path),
+            "bundle_name": bundle_path.name,
+            "bundle_size": bundle_path.stat().st_size,
+        }
+    )
+
+    # GitHub Releases への自動公開（トークン設定時）
+    if settings.github_token:
+        result.update(_publish_github_release(settings, patch_root, bundle_path, created, label))
+    return result
 
 
 def reset_repository_patches(
@@ -486,39 +597,37 @@ def reset_repository_patches(
     ensure_repository(patch_root)
     if not settings.patch_password:
         raise RepPatchError("パッチ検証用パスワードを設定してください")
-
+    new_baseline = resolve_commit(Path(config.path), new_baseline_commit) if new_baseline_commit else ""
+    _ensure_patch_repo_clean(patch_root)
     _push_pending(patch_root)
 
-    # 1. パッチ専用リポジトリの該当パッケージディレクトリを削除
-    target_repo_dir = patch_root / "packages" / repo_id
-    if target_repo_dir.exists():
-        shutil.rmtree(target_repo_dir)
-
-    # 2. package-index.json から該当 repo_id を除外して再署名
-    index_path = patch_root / "package-index.json"
+    index_path = patch_root / INDEX_NAME
     index = load_index(index_path, settings.patch_password)
-    remaining_packages = [
-        item for item in index.get("packages", []) if item.get("repo_id") != repo_id
-    ]
-    index["packages"] = remaining_packages
-    unsigned_index = {key: value for key, value in index.items() if key != "signature"}
-    signed_index = sign_document(unsigned_index, settings.patch_password)
-    write_json(index_path, signed_index)
+    try:
+        # 1. パッチ専用リポジトリの該当パッケージディレクトリを削除
+        target_repo_dir = patch_root / "packages" / repo_id
+        if target_repo_dir.exists():
+            shutil.rmtree(target_repo_dir)
 
-    # 3. パッチ専用リポジトリでコミット＆push
-    run_git(patch_root, ["add", "-A"])
-    diff_status = run_git(patch_root, ["status", "--porcelain=v1"]).text.strip()
-    if diff_status:
-        run_git(patch_root, ["commit", "-m", f"Reset patches for {config.display_name}"])
-        run_git(patch_root, ["push"])
-    else:
-        _push_pending(patch_root)
+        # 2. package-index.json から該当 repo_id を除外して再署名
+        index["packages"] = [item for item in index.get("packages", []) if item.get("repo_id") != repo_id]
+        unsigned_index = {key: value for key, value in index.items() if key != "signature"}
+        write_json(index_path, sign_document(unsigned_index, settings.patch_password))
+
+        # 3. パッチ専用リポジトリでコミット
+        run_git(patch_root, ["add", "-A"])
+        if run_git(patch_root, ["status", "--porcelain=v1"]).text:
+            run_git(patch_root, ["commit", "-m", f"Reset patches for {config.display_name}"])
+    except BaseException:
+        _restore_patch_worktree(patch_root)
+        raise
+    _push_pending(patch_root)
 
     # 4. 自宅側設定の更新（published_commit のクリア、last_sequenceの初期化、および任意で baseline_commit の更新）
     config.published_commit = ""
     config.last_sequence = 0
-    if new_baseline_commit:
-        config.baseline_commit = resolve_commit(Path(config.path), new_baseline_commit)
+    if new_baseline:
+        config.baseline_commit = new_baseline
     settings.repositories[repo_id] = config
     store.save(settings)
 
@@ -529,5 +638,3 @@ def reset_repository_patches(
         "message": f"{config.display_name} のパッチ履歴をリセットしました（次回パッチ連番: #000001）",
         "repository": asdict(config),
     }
-
-

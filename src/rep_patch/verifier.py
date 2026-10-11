@@ -1,28 +1,33 @@
 """
 会社側クリーン環境シミュレーション検証モジュール
 
+会社へ届くのはGitにコミットされたファイルだけである。自宅の作業ツリーにだけ存在するファイルへ
+依存していないか、また今回の差分が会社側で適用できる形かを、公開前に検査する。
+
 仕様:
 - verify_clean_repository:
-  1. 対象コミット（HEAD）のGit追跡ファイルのみを一時ディレクトリに展開（git archive）
+  1. 対象コミット（固定ブランチの先頭）のGit追跡ファイル一覧を取得（会社へ届くファイルの全体）
   2. 自宅ローカルの作業ツリーに存在し、.gitignore等でGit管理から外れている重要設定ファイル（.json, .txt, .yaml, .toml等）を検知し、ファイル欠落エラーとして報告
   3. Git追跡対象に .example / .sample / .template / .default 等のテンプレートファイルが存在する場合、ローカル実ファイルの欠落を許容（エラーから除外）
   4. ignore_patterns（カスタム除外パターン）に合致するファイルは検証から除外
-  5. 重要ディレクトリの空ディレクトリや必須成果物の欠落を検査
-  6. 直前コミット（baseline_commit）が指定されている場合、パッチ生成と差分適用シミュレーションを実施
-  7. 検証結果（valid, repo_id, target_commit, errors, warnings, checked_files）を返却
+  5. 直前コミット（baseline_commit）が指定されている場合、そこからの差分が公開・適用できる形かを検査
+     - 直前コミットが対象コミットの祖先であること
+     - 差分に、会社側が受け付けないパスやサブモジュールが含まれないこと
+  6. 検証結果（valid, repo_id, branch, target_commit, errors, warnings, checked_files）を返却
+- verify_repository_config: リポジトリ設定（RepositoryConfig）から検証条件を組み立てて検証
+- verify_all_repositories: 有効な全リポジトリを一括検証して集計
 """
 from __future__ import annotations
 
 import fnmatch
 import os
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
-from .errors import RepPatchError
-from .git import ensure_repository, resolve_commit, run_git
+from .config import RepositoryConfig
+from .errors import PackageValidationError
+from .git import diff_file_status, ensure_repository, is_ancestor, resolve_commit, tracked_files
+from .security import safe_relative_path
 
 
 CONFIG_EXTENSIONS = {".json", ".txt", ".yaml", ".yml", ".toml", ".ini", ".conf", ".xml"}
@@ -85,11 +90,31 @@ def _matches_any_pattern(path_str: str, patterns: list[str]) -> bool:
     return False
 
 
+def unsupported_diff_entries(
+    repo: Path, base: str, target: str, target_entries: list[dict[str, str]]
+) -> list[str]:
+    """base..target の差分のうち、会社側で適用できないものを説明文の一覧で返す。"""
+    problems: list[str] = []
+    entry_types = {item["path"]: item["type"] for item in target_entries}
+    status = diff_file_status(repo, base, target)
+    for rel_path in sorted(set(status["added"] + status["modified"] + status["deleted"])):
+        try:
+            safe_relative_path(rel_path)
+        except PackageValidationError:
+            problems.append(f"会社側で適用できないパスが差分に含まれています: '{rel_path}'")
+    for rel_path in sorted(set(status["added"] + status["modified"])):
+        if entry_types.get(rel_path, "blob") != "blob":
+            problems.append(f"サブモジュールはパッチに含められません: '{rel_path}'")
+    return problems
+
+
 def verify_clean_repository(
     repo_path: Path | str,
     branch: str = "main",
     baseline_commit: str | None = None,
     ignore_patterns: list[str] | None = None,
+    *,
+    repo_id: str | None = None,
 ) -> dict[str, Any]:
     """
     リポジトリが会社側クリーン環境（Git追跡対象ファイルのみ）で正常に動作・整合するかをシミュレーション検証する
@@ -98,165 +123,99 @@ def verify_clean_repository(
     ensure_repository(repo)
 
     target_commit = resolve_commit(repo, branch)
-    repo_id = repo.name
     custom_patterns = list(ignore_patterns or [])
 
     errors: list[str] = []
     warnings: list[str] = []
-    checked_files: list[str] = []
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        clean_dir = Path(temp_dir) / "clean_worktree"
-        clean_dir.mkdir()
+    # 1. 対象コミットで会社へ届くファイル一覧、およびテンプレート（.example等）の基底パス
+    target_entries = tracked_files(repo, target_commit)
+    tracked_rel_paths = {item["path"] for item in target_entries}
+    tracked_template_bases = {
+        rel[: -len(suffix)]
+        for rel in tracked_rel_paths
+        for suffix in TEMPLATE_SUFFIXES
+        if rel.endswith(suffix)
+    }
 
-        # 1. git archive で対象コミットのファイルのみをクリーン環境へ展開
-        archive_res = run_git(repo, ["archive", target_commit])
-        tar_proc = subprocess.run(
-            ["tar", "-x", "-C", str(clean_dir)],
-            input=archive_res.stdout,
-            capture_output=True,
-            check=False,
-        )
-        if tar_proc.returncode != 0:
-            raise RepPatchError(f"クリーン環境の展開に失敗しました: {tar_proc.stderr.decode()}")
+    # 2. ローカル作業ツリーの走査:
+    # ローカルに存在しているが、.gitignore等でGit管理から漏れている重要設定ファイル（.json, .txt等）を検知
+    for root, dirs, files in os.walk(repo):
+        # 無視フォルダをスキップ
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_PATTERNS and not d.startswith(".")]
+        for f in files:
+            file_path = Path(root) / f
+            if file_path.is_symlink() or not file_path.is_file():
+                continue
+            rel = file_path.relative_to(repo)
+            if rel.suffix.lower() not in CONFIG_EXTENSIONS or _is_noise_path(rel):
+                continue
 
-        # クリーン環境に存在する全ファイル一覧およびテンプレート（.example等）の基底パス
-        tracked_rel_paths = set()
-        tracked_template_bases = set()
-        for p in clean_dir.rglob("*"):
-            if p.is_file():
-                rel = p.relative_to(clean_dir).as_posix()
-                tracked_rel_paths.add(rel)
-                checked_files.append(rel)
-
-                # テンプレートファイルの対応元パスを記録（例: foo.txt.example -> foo.txt）
-                for suffix in TEMPLATE_SUFFIXES:
-                    if rel.endswith(suffix):
-                        base_rel = rel[: -len(suffix)]
-                        tracked_template_bases.add(base_rel)
-
-        # 2. ローカル作業ツリーの走査:
-        # ローカルに存在しているが、.gitignore等でGit管理から漏れている重要設定ファイル（.json, .txt等）を検知
-        for root, dirs, files in os.walk(repo):
-            # 無視フォルダをスキップ
-            dirs[:] = [d for d in dirs if d not in EXCLUDED_PATTERNS and not d.startswith(".")]
-            for f in files:
-                file_path = Path(root) / f
-                if file_path.is_symlink() or not file_path.is_file():
-                    continue
-                rel = file_path.relative_to(repo)
-                if _is_noise_path(rel):
-                    continue
-
-                rel_posix = rel.as_posix()
-                if _matches_any_pattern(rel_posix, custom_patterns):
-                    continue
-
-                # .example 自体はエラー対象外
-                if any(rel_posix.endswith(s) for s in TEMPLATE_SUFFIXES):
-                    continue
-
-                if rel.suffix.lower() in CONFIG_EXTENSIONS:
-                    # Git側にテンプレート（.example等）が存在する場合は環境別ローカル設定とみなし除外
-                    if rel_posix in tracked_template_bases:
-                        continue
-
-                    if rel_posix not in tracked_rel_paths:
-                        errors.append(
-                            f"重要設定ファイル '{rel_posix}' がローカルに存在しますが、.gitignoreまたは未コミットのためGit管理に含まれていません。会社環境でファイル不在エラーが発生します。"
-                        )
-
-        # 3. パッチ適用シミュレーション（baseline_commit が指定されている場合）
-        if baseline_commit:
-            base_resolved = resolve_commit(repo, baseline_commit)
-            if base_resolved != target_commit:
-                sim_repo_dir = Path(temp_dir) / "sim_repo"
-                sim_repo_dir.mkdir()
-                run_git(sim_repo_dir, ["init", "-b", branch])
-                run_git(sim_repo_dir, ["config", "user.name", "Simulation"])
-                run_git(sim_repo_dir, ["config", "user.email", "sim@example.com"])
-
-                base_archive = run_git(repo, ["archive", base_resolved])
-                subprocess.run(
-                    ["tar", "-x", "-C", str(sim_repo_dir)],
-                    input=base_archive.stdout,
-                    check=True,
+            rel_posix = rel.as_posix()
+            if _matches_any_pattern(rel_posix, custom_patterns):
+                continue
+            # Git側にテンプレート（.example等）が存在する場合は環境別ローカル設定とみなし除外
+            if rel_posix in tracked_template_bases:
+                continue
+            if rel_posix not in tracked_rel_paths:
+                errors.append(
+                    f"重要設定ファイル '{rel_posix}' がローカルに存在しますが、.gitignoreまたは未コミットのためGit管理に含まれていません。会社環境でファイル不在エラーが発生します。"
                 )
-                run_git(sim_repo_dir, ["add", "-A"])
-                run_git(sim_repo_dir, ["commit", "-m", "Baseline"])
 
-                # 差分パッチを作成してシミュレーション適用
-                diff_res = run_git(repo, ["diff", "--binary", base_resolved, target_commit, "--"])
-                if diff_res.stdout:
-                    patch_path = Path(temp_dir) / "test.patch"
-                    patch_path.write_bytes(diff_res.stdout)
-                    apply_res = run_git(
-                        sim_repo_dir,
-                        ["apply", "--check", "--binary", str(patch_path)],
-                        check=False,
-                    )
-                    if apply_res.returncode != 0:
-                        errors.append(f"差分パッチの模擬適用に失敗しました: {apply_res.stderr}")
+    # 3. 直前コミットからの差分が公開・適用できる形かの検査
+    if baseline_commit:
+        base_resolved = resolve_commit(repo, baseline_commit)
+        if base_resolved != target_commit:
+            if not is_ancestor(repo, base_resolved, target_commit):
+                errors.append(
+                    f"直前の公開地点 {base_resolved[:8]} が {branch} の祖先ではないため、差分パッチを作成できません。"
+                )
+            else:
+                errors.extend(unsupported_diff_entries(repo, base_resolved, target_commit, target_entries))
 
-    valid = len(errors) == 0
     return {
-        "valid": valid,
-        "repo_id": repo_id,
+        "valid": not errors,
+        "repo_id": repo_id or repo.name,
         "branch": branch,
         "target_commit": target_commit,
         "errors": errors,
         "warnings": warnings,
-        "checked_files": sorted(checked_files),
+        "checked_files": sorted(tracked_rel_paths),
     }
 
 
-def verify_all_repositories(repositories: dict[str, Any]) -> dict[str, Any]:
+def verify_repository_config(config: RepositoryConfig) -> dict[str, Any]:
+    """リポジトリ設定の固定ブランチ・直前の公開地点・除外パターンで検証する"""
+    return verify_clean_repository(
+        config.path,
+        branch=config.branch or "main",
+        baseline_commit=config.published_commit or config.baseline_commit or None,
+        ignore_patterns=config.clean_verify_ignore_patterns,
+        repo_id=config.repo_id,
+    )
+
+
+def verify_all_repositories(repositories: dict[str, RepositoryConfig]) -> dict[str, Any]:
     """登録された有効な全リポジトリの会社側クリーン環境シミュレーション検証を一括実行する"""
     results: dict[str, dict[str, Any]] = {}
-    all_valid = True
-    total_errors = 0
-    total_warnings = 0
-
     for repo_id, config in repositories.items():
-        enabled = getattr(config, "enabled", True)
-        if not enabled:
+        if not config.enabled:
             continue
-        path = getattr(config, "path", None) or (config.get("path") if isinstance(config, dict) else None)
-        branch = getattr(config, "branch", "main") or "main"
-        baseline = getattr(config, "baseline_commit", "") or ""
-        published = getattr(config, "published_commit", "") or ""
-        base = published or baseline or None
-        ignore_pats = (
-            getattr(config, "clean_verify_ignore_patterns", None)
-            or (config.get("clean_verify_ignore_patterns") if isinstance(config, dict) else None)
-            or []
-        )
-
         try:
-            res = verify_clean_repository(
-                path, branch=branch, baseline_commit=base, ignore_patterns=ignore_pats
-            )
-        except Exception as exc:
-            res = {
+            results[repo_id] = verify_repository_config(config)
+        except Exception as exc:  # noqa: BLE001 - report the failure as this repository's result
+            results[repo_id] = {
                 "valid": False,
                 "repo_id": repo_id,
-                "branch": branch,
+                "branch": config.branch,
                 "target_commit": "",
                 "errors": [str(exc)],
                 "warnings": [],
                 "checked_files": [],
             }
-
-        results[repo_id] = res
-        if not res["valid"]:
-            all_valid = False
-            total_errors += len(res["errors"])
-        total_warnings += len(res["warnings"])
-
     return {
-        "all_valid": all_valid,
-        "total_errors": total_errors,
-        "total_warnings": total_warnings,
+        "all_valid": all(item["valid"] for item in results.values()),
+        "total_errors": sum(len(item["errors"]) for item in results.values()),
+        "total_warnings": sum(len(item["warnings"]) for item in results.values()),
         "results": results,
     }
-

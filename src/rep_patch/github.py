@@ -21,6 +21,10 @@ import urllib.request
 from .errors import RepPatchError
 from .git import run_git
 
+# 応答が返らないまま公開処理が終わらなくなるのを防ぐための通信タイムアウト（秒）
+API_TIMEOUT_SECONDS = 60
+UPLOAD_TIMEOUT_SECONDS = 30 * 60
+
 
 class GitHubApiError(RepPatchError):
     """GitHub API関連のエラー"""
@@ -56,6 +60,44 @@ def get_repo_slug(patch_root: Path, explicit_repo: str = "") -> str:
     raise GitHubApiError("GitHubリポジトリ（owner/repo）を特定できませんでした")
 
 
+def _post_json(
+    url: str,
+    token: str,
+    data: bytes,
+    content_type: str,
+    *,
+    timeout: float,
+    action: str,
+) -> dict[str, Any]:
+    """GitHub APIへPOSTし、JSON応答を返す。失敗時はGitHubのエラーメッセージを添えてGitHubApiErrorにする。"""
+    if not token.strip():
+        raise GitHubApiError("GitHubトークンが指定されていません")
+    headers = {
+        "Authorization": f"Bearer {token.strip()}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "myao-patch-bridge",
+        "Content-Type": content_type,
+        "Content-Length": str(len(data)),
+    }
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode("utf-8", errors="replace")
+        try:
+            msg = json.loads(err_body).get("message", err_body)
+        except Exception:
+            msg = err_body
+        raise GitHubApiError(f"GitHub {action}エラー ({exc.code}): {msg}") from exc
+    except urllib.error.URLError as exc:
+        raise GitHubApiError(f"GitHub通信エラー: {exc.reason}") from exc
+    except (OSError, ValueError) as exc:
+        # 応答待ちのタイムアウトや、JSONとして読めない応答
+        raise GitHubApiError(f"GitHub通信エラー: {exc}") from exc
+
+
 def create_github_release(
     token: str,
     repo_slug: str,
@@ -64,16 +106,6 @@ def create_github_release(
     body: str = "",
 ) -> dict[str, Any]:
     """GitHub Releases APIを呼び出して新規リリースを作成する"""
-    if not token.strip():
-        raise GitHubApiError("GitHubトークンが指定されていません")
-    url = f"https://api.github.com/repos/{repo_slug}/releases"
-    headers = {
-        "Authorization": f"Bearer {token.strip()}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "myao-patch-bridge",
-        "Content-Type": "application/json",
-    }
     payload = {
         "tag_name": tag_name,
         "name": name,
@@ -81,22 +113,14 @@ def create_github_release(
         "draft": False,
         "prerelease": False,
     }
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req) as resp:
-            raw = resp.read().decode("utf-8")
-            return json.loads(raw)
-    except urllib.error.HTTPError as exc:
-        err_body = exc.read().decode("utf-8", errors="replace")
-        try:
-            err_json = json.loads(err_body)
-            msg = err_json.get("message", err_body)
-        except Exception:
-            msg = err_body
-        raise GitHubApiError(f"GitHub Release作成エラー ({exc.code}): {msg}") from exc
-    except urllib.error.URLError as exc:
-        raise GitHubApiError(f"GitHub通信エラー: {exc.reason}") from exc
+    return _post_json(
+        f"https://api.github.com/repos/{repo_slug}/releases",
+        token,
+        json.dumps(payload).encode("utf-8"),
+        "application/json",
+        timeout=API_TIMEOUT_SECONDS,
+        action="Release作成",
+    )
 
 
 def upload_release_asset(
@@ -114,29 +138,11 @@ def upload_release_asset(
     # upload_url は "https://uploads.github.com/.../assets{?name,label}" のような形式
     base_url = re.sub(r"\{.*?\}$", "", upload_url)
     query = urllib.parse.urlencode({"name": file_path.name})
-    target_url = f"{base_url}?{query}"
-
-    file_bytes = file_path.read_bytes()
-    headers = {
-        "Authorization": f"Bearer {token.strip()}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "myao-patch-bridge",
-        "Content-Type": content_type,
-        "Content-Length": str(len(file_bytes)),
-    }
-    req = urllib.request.Request(target_url, data=file_bytes, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req) as resp:
-            raw = resp.read().decode("utf-8")
-            return json.loads(raw)
-    except urllib.error.HTTPError as exc:
-        err_body = exc.read().decode("utf-8", errors="replace")
-        try:
-            err_json = json.loads(err_body)
-            msg = err_json.get("message", err_body)
-        except Exception:
-            msg = err_body
-        raise GitHubApiError(f"GitHub Assetアップロードエラー ({exc.code}): {msg}") from exc
-    except urllib.error.URLError as exc:
-        raise GitHubApiError(f"GitHub通信エラー: {exc.reason}") from exc
+    return _post_json(
+        f"{base_url}?{query}",
+        token,
+        file_path.read_bytes(),
+        content_type,
+        timeout=UPLOAD_TIMEOUT_SECONDS,
+        action="Assetアップロード",
+    )

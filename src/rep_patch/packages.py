@@ -1,23 +1,24 @@
 """
-パッチパッケージの分割・保存・復元およびZIPアーカイブ処理を行うモジュール
+パッチパッケージの分割・保存およびZIPアーカイブ処理を行うモジュール
 
 仕様:
 - SCHEMA_VERSION: パッケージ仕様バージョン
+- package_dir / index_entry / build_index: パッケージの配置パスと署名付きインデックスの組み立て
 - split_patch: 指定サイズごとのバイナリパッチ分割処理
 - resolve_added_file_content: 改行コード変換（CRLF↔LF）差異を透過的に検知・元バイト列復元するファイル検証処理
-- PatchArchive: パッチZIPの安全な検証・展開・再構築および追加ファイル読み込み
+- PatchArchive: パッチZIPを一括展開せずに検証し、同梱ファイル実体を読み出す
 - create_release_bundle: 今回公開されたパッチのみを含む配布用軽量ZIPアーカイブの生成
+
+補足:
+- 分割パッチ（changes.patch.part-*）は形式v1との互換性のために生成・検証するが、会社側の適用には使わない。
+  適用に使うのは同梱ファイル実体（added_files/）と削除一覧（deleted_files）だけである。
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
 import json
-import os
-import tempfile
 import zipfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -25,23 +26,22 @@ from typing import Any
 from typing_extensions import Self
 
 from .errors import PackageValidationError
+from .fileio import atomic_write_text
 from .security import safe_relative_path, sha256_bytes, sign_document, verify_document
 
 SCHEMA_VERSION = 1
 PACKAGE_TYPE = "myao-patch-bridge"
 LEGACY_PACKAGE_TYPES = {"myao-rep-patch"}
+INDEX_NAME = "package-index.json"
 MAX_ZIP_FILES = 20_000
 MAX_ZIP_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 MAX_JSON_BYTES = 20 * 1024 * 1024
+MAX_CHUNK_BYTES = 50 * 1024 * 1024
+MAX_ADDED_FILE_BYTES = 500 * 1024 * 1024
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    temporary.replace(path)
+    atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -54,15 +54,36 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def new_index(password: str) -> dict[str, Any]:
+def package_dir(repo_id: str, sequence: int) -> PurePosixPath:
+    """パッチ専用リポジトリ（およびZIP）内でのパッケージ配置パス"""
+    return PurePosixPath("packages") / repo_id / f"{sequence:06d}"
+
+
+def index_entry(repo_id: str, sequence: int) -> dict[str, Any]:
+    return {
+        "repo_id": repo_id,
+        "sequence": sequence,
+        "manifest_path": str(package_dir(repo_id, sequence) / "manifest.json"),
+    }
+
+
+def build_index(manifests: list[dict[str, Any]], password: str) -> dict[str, Any]:
+    """指定したマニフェストだけを載せた署名付き package-index.json を組み立てる"""
     return sign_document(
         {
             "schema_version": SCHEMA_VERSION,
             "package_type": PACKAGE_TYPE,
-            "packages": [],
+            "packages": [
+                index_entry(str(manifest["repo_id"]), int(manifest["sequence"]))
+                for manifest in manifests
+            ],
         },
         password,
     )
+
+
+def new_index(password: str) -> dict[str, Any]:
+    return build_index([], password)
 
 
 def load_index(path: Path, password: str) -> dict[str, Any]:
@@ -122,6 +143,18 @@ class ArchivePackage:
     manifest_path: str
     manifest: dict[str, Any]
 
+    @property
+    def repo_id(self) -> str:
+        return str(self.manifest["repo_id"])
+
+    @property
+    def sequence(self) -> int:
+        return int(self.manifest["sequence"])
+
+    @property
+    def display_name(self) -> str:
+        return str(self.manifest.get("display_name") or self.repo_id)
+
 
 class PatchArchive:
     """Safely reads a GitHub source ZIP without extracting it wholesale."""
@@ -133,9 +166,14 @@ class PatchArchive:
             self.zip = zipfile.ZipFile(path)
         except (OSError, zipfile.BadZipFile) as exc:
             raise PackageValidationError(f"ZIPを開けません: {exc}") from exc
-        self._validate_members()
-        self.root_prefix, self.index = self._load_index()
-        self.packages = self._load_manifests()
+        try:
+            self._validate_members()
+            self.root_prefix, self.index = self._load_index()
+            self.packages = self._load_manifests()
+        except BaseException:
+            # 検証に失敗したZIPを開いたままにしない（Windowsではファイルがロックされ続ける）
+            self.zip.close()
+            raise
 
     def close(self) -> None:
         self.zip.close()
@@ -168,7 +206,7 @@ class PatchArchive:
         candidates = [
             name
             for name in self.zip.namelist()
-            if PurePosixPath(name).name == "package-index.json"
+            if PurePosixPath(name).name == INDEX_NAME
         ]
         if len(candidates) != 1:
             raise PackageValidationError("package-index.jsonを1つだけ含む必要があります")
@@ -201,14 +239,17 @@ class PatchArchive:
             verify_document(manifest, self.password)
             if manifest.get("schema_version") != SCHEMA_VERSION:
                 raise PackageValidationError(f"未対応のマニフェストです: {relative}")
-            key = (str(manifest.get("repo_id")), int(manifest.get("sequence", 0)))
+            sequence = manifest.get("sequence")
+            if not isinstance(manifest.get("repo_id"), str) or not isinstance(sequence, int) or sequence < 1:
+                raise PackageValidationError(f"マニフェストのリポジトリIDまたは連番が不正です: {relative}")
+            key = (manifest["repo_id"], sequence)
             if key in seen:
                 raise PackageValidationError(f"パッケージ連番が重複しています: {key}")
             seen.add(key)
             self._verify_chunks(relative, manifest)
             self._verify_added_files(relative, manifest)
             result.append(ArchivePackage(relative, manifest))
-        return sorted(result, key=lambda package: (package.manifest["repo_id"], package.manifest["sequence"]))
+        return sorted(result, key=lambda package: (package.repo_id, package.sequence))
 
     def _read_limited(self, name: str, limit: int) -> bytes:
         try:
@@ -233,12 +274,12 @@ class PatchArchive:
             if name != f"changes.patch.part-{expected_index:06d}":
                 raise PackageValidationError("パッチ分割ファイルの順序が不正です")
             archive_name = self.root_prefix + str(base / name)
-            value = self._read_limited(archive_name, 50 * 1024 * 1024)
-            if len(value) != int(chunk.get("size", -1)) or sha256_bytes(value) != chunk.get("sha256"):
+            value = self._read_limited(archive_name, MAX_CHUNK_BYTES)
+            if len(value) != chunk.get("size") or sha256_bytes(value) != chunk.get("sha256"):
                 raise PackageValidationError(f"パッチ分割ファイルが破損しています: {name}")
             digest.update(value)
             total_size += len(value)
-        if total_size != int(manifest.get("patch_size", -1)):
+        if total_size != manifest.get("patch_size"):
             raise PackageValidationError("復元パッチのサイズが一致しません")
         if digest.hexdigest() != manifest.get("patch_sha256"):
             raise PackageValidationError("復元パッチのSHA-256が一致しません")
@@ -249,58 +290,37 @@ class PatchArchive:
             return
         if not isinstance(added_files, list):
             raise PackageValidationError(f"added_filesが不正です: {manifest_path}")
-        base = PurePosixPath(manifest_path).parent
         for record in added_files:
             if not isinstance(record, dict):
                 raise PackageValidationError(f"added_filesの要素が不正です: {manifest_path}")
-            raw_path = str(record.get("path", ""))
-            safe_path = str(safe_relative_path(raw_path))
-            archive_name = self.root_prefix + str(base / "added_files" / safe_path)
-            content = self._read_limited(archive_name, 500 * 1024 * 1024)
-            resolved = resolve_added_file_content(
-                content, int(record.get("size", -1)), str(record.get("sha256", ""))
-            )
-            if resolved is None:
-                raise PackageValidationError(f"追加ファイルが破損しています: {safe_path}")
+            self._read_added_record(manifest_path, record)
+
+    def _read_added_record(self, manifest_path: str, record: dict[str, Any]) -> bytes:
+        """同梱ファイル実体を読み、マニフェスト記載のサイズ・SHA-256と一致するバイト列を返す"""
+        safe_path = str(safe_relative_path(str(record.get("path", ""))))
+        base = PurePosixPath(manifest_path).parent
+        archive_name = self.root_prefix + str(base / "added_files" / safe_path)
+        content = self._read_limited(archive_name, MAX_ADDED_FILE_BYTES)
+        size = record.get("size")
+        resolved = resolve_added_file_content(
+            content, size if isinstance(size, int) else -1, str(record.get("sha256", ""))
+        )
+        if resolved is None:
+            raise PackageValidationError(f"追加ファイルが破損しています: {safe_path}")
+        return resolved
 
     def read_added_file(self, package: ArchivePackage, relative_path: str) -> bytes:
-        base = PurePosixPath(package.manifest_path).parent
         safe_path = str(safe_relative_path(relative_path))
-        archive_name = self.root_prefix + str(base / "added_files" / safe_path)
-        content = self._read_limited(archive_name, 500 * 1024 * 1024)
         for record in package.manifest.get("added_files") or []:
             if isinstance(record, dict) and str(safe_relative_path(str(record.get("path", "")))) == safe_path:
-                resolved = resolve_added_file_content(
-                    content, int(record.get("size", -1)), str(record.get("sha256", ""))
-                )
-                if resolved is not None:
-                    return resolved
-                break
-        return content
+                return self._read_added_record(package.manifest_path, record)
+        raise PackageValidationError(f"マニフェストに記載のない追加ファイルです: {safe_path}")
 
     def package_groups(self) -> dict[str, list[ArchivePackage]]:
         result: dict[str, list[ArchivePackage]] = {}
         for package in self.packages:
-            result.setdefault(package.manifest["repo_id"], []).append(package)
+            result.setdefault(package.repo_id, []).append(package)
         return result
-
-    @contextmanager
-    def reconstructed_patch(self, package: ArchivePackage, directory: Path) -> Iterator[Path]:
-        manifest = package.manifest
-        base = PurePosixPath(package.manifest_path).parent
-        directory.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(prefix="rep-patch-", suffix=".patch", dir=directory)
-        os.close(descriptor)
-        target = Path(temporary_name)
-        try:
-            with target.open("wb") as stream:
-                for chunk in manifest["chunks"]:
-                    stream.write(self.zip.read(self.root_prefix + str(base / chunk["name"])))
-            if target.stat().st_size != manifest["patch_size"]:
-                raise PackageValidationError("復元パッチのサイズが一致しません")
-            yield target
-        finally:
-            target.unlink(missing_ok=True)
 
     def summary(self) -> dict[str, Any]:
         groups = self.package_groups()
@@ -311,11 +331,11 @@ class PatchArchive:
             "repositories": [
                 {
                     "repo_id": repo_id,
-                    "display_name": packages[-1].manifest["display_name"],
-                    "kind": packages[-1].manifest["kind"],
-                    "first_sequence": packages[0].manifest["sequence"],
-                    "last_sequence": packages[-1].manifest["sequence"],
-                    "total_patch_size": sum(item.manifest["patch_size"] for item in packages),
+                    "display_name": packages[-1].display_name,
+                    "kind": str(packages[-1].manifest.get("kind", "app")),
+                    "first_sequence": packages[0].sequence,
+                    "last_sequence": packages[-1].sequence,
+                    "total_patch_size": sum(int(item.manifest.get("patch_size", 0)) for item in packages),
                 }
                 for repo_id, packages in groups.items()
             ],
@@ -338,44 +358,25 @@ def create_release_bundle(
         bundle_name = f"myao_app_patch_{timestamp}.zip"
     zip_path = output_dir / bundle_name
 
-    packages_entry = []
-    for manifest in created_manifests:
-        repo_id = str(manifest["repo_id"])
-        seq = int(manifest["sequence"])
-        manifest_rel = f"packages/{repo_id}/{seq:06d}/manifest.json"
-        packages_entry.append(
-            {
-                "repo_id": repo_id,
-                "sequence": seq,
-                "manifest_path": manifest_rel,
-            }
-        )
-
-    bundle_index = sign_document(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "package_type": PACKAGE_TYPE,
-            "packages": packages_entry,
-        },
-        password,
-    )
+    bundle_index = build_index(created_manifests, password)
 
     temp_zip = zip_path.with_suffix(zip_path.suffix + ".tmp")
-    with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        index_bytes = (json.dumps(bundle_index, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        zf.writestr("package-index.json", index_bytes)
+    try:
+        with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            index_bytes = (json.dumps(bundle_index, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            zf.writestr(INDEX_NAME, index_bytes)
 
-        for manifest in created_manifests:
-            repo_id = str(manifest["repo_id"])
-            seq = int(manifest["sequence"])
-            target_dir = patch_root / "packages" / repo_id / f"{seq:06d}"
-            if not target_dir.exists():
-                raise PackageValidationError(f"パッチディレクトリが存在しません: {target_dir}")
-            for item in sorted(target_dir.rglob("*")):
-                if item.is_file():
-                    arcname = f"packages/{repo_id}/{seq:06d}/{item.relative_to(target_dir).as_posix()}"
-                    zf.write(item, arcname)
-
-    temp_zip.replace(zip_path)
+            for manifest in created_manifests:
+                relative_dir = package_dir(str(manifest["repo_id"]), int(manifest["sequence"]))
+                target_dir = patch_root.joinpath(*relative_dir.parts)
+                if not target_dir.exists():
+                    raise PackageValidationError(f"パッチディレクトリが存在しません: {target_dir}")
+                for item in sorted(target_dir.rglob("*")):
+                    if item.is_file():
+                        zf.write(item, str(relative_dir / item.relative_to(target_dir).as_posix()))
+        temp_zip.replace(zip_path)
+    except BaseException:
+        temp_zip.unlink(missing_ok=True)
+        raise
     return zip_path
 

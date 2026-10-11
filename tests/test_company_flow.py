@@ -12,6 +12,14 @@
 - test_init_all_repositories_sequence: 全リポジトリ一括での適用開始番号初期化・state.json生成検証
 - test_apply_auto_commits_uncommitted_changes_and_immediately_commits_patch: 未コミット変更の自動事前コミットとパッチ適用の即時確定・クリーン化検証
 - test_apply_added_files_with_crlf_lf_conversion: Git改行コード変換（CRLF↔LF）が生じた追加ファイルでも破損と誤判定されず安全に検証・復元適用される検証
+- test_apply_patch_whose_content_already_matches_advances_sequence: 内容が既に一致しているパッチはコミットを作らず適用済みとして連番を進める検証
+- test_failed_apply_restores_pre_apply_commit_and_files: 適用途中・コミット後の失敗でも、適用前のコミットとファイル（Git管理外を含む）へ復元される検証
+- test_apply_reports_missing_sequence: 連番が欠けたZIPは適用せず、必要な連番を示して失敗する検証
+- test_legacy_pending_state_is_committed_as_confirmed: 旧バージョンが残した未コミット適用済み連番を確定済みへ取り込む検証
+- test_excluded_repository_is_skipped_but_can_be_applied_individually: 除外中リポジトリの一括適用スキップと個別適用の検証
+- test_retry_for_repository_not_in_archive_reports_unchanged: ZIPに含まれないアプリへの個別適用が結果として返る検証
+- test_download_listing_and_zip_location_guard: ZIP一覧取得と、ダウンロードフォルダ外のZIPを拒否する検証
+- test_inspect_reports_unmapped_repository: 会社側に対応リポジトリが無い場合の検証結果の検証
 """
 from __future__ import annotations
 
@@ -21,16 +29,20 @@ from pathlib import Path
 
 import pytest
 
+import rep_patch.company as company_module
 from rep_patch.company import (
     apply_archive,
     commit_pending,
     init_all_repositories_sequence,
     init_repository_sequence,
+    inspect_archive,
     list_company_repositories,
+    list_download_packages,
     load_state,
+    save_state,
 )
 from rep_patch.config import Settings
-from rep_patch.errors import RepPatchError
+from rep_patch.errors import PackageValidationError, RepPatchError
 from rep_patch.git import changed_paths, diff_file_status, tracked_files
 from rep_patch.packages import PACKAGE_TYPE, SCHEMA_VERSION, split_patch
 from rep_patch.security import sha256_bytes, sign_document
@@ -169,7 +181,6 @@ def test_independent_git_history_apply_then_auto_commit(tmp_path: Path, git_help
     assert git(company, "log", "-1", "--pretty=%s").decode().strip() == "[myao-patch] sample-app patch-000001"
     state = load_state(company, "sample-app")
     assert state["confirmed_sequence"] == 1
-    assert state["pending_sequences"] == []
 
     (source / "app.txt").write_text("patch two\n", encoding="utf-8")
     (source / "日本語.txt").write_text("追加と修正\n", encoding="utf-8")
@@ -188,7 +199,6 @@ def test_independent_git_history_apply_then_auto_commit(tmp_path: Path, git_help
     assert log == "[myao-patch] sample-app patch-000002"
     state = load_state(company, "sample-app")
     assert state["confirmed_sequence"] == 2
-    assert state["pending_sequences"] == []
 
 
 def test_apply_succeeds_even_with_company_specific_files(tmp_path: Path, git_helpers) -> None:
@@ -276,7 +286,7 @@ def test_apply_with_added_and_deleted_files_and_rollback(tmp_path: Path, git_hel
 
 
 def test_force_overwrite_and_delete_applies_directly(tmp_path: Path, git_helpers) -> None:
-    """git applyを使わずにファイルを直接強制上書き・新規配置・削除して未コミット状態にするテスト"""
+    """git applyを使わずにファイルを直接強制上書き・新規配置・削除し、会社側の内容が異なっていても適用できるテスト"""
     git, init_repo = git_helpers
     source = init_repo(tmp_path / "source")
     (source / "file_mod.txt").write_text("source v1\n", encoding="utf-8")
@@ -352,7 +362,6 @@ def test_single_repository_commit_pending(tmp_path: Path, git_helpers) -> None:
     assert result["failed"] == 0
     state = load_state(company, "sample-app")
     assert state["confirmed_sequence"] == 1
-    assert state["pending_sequences"] == []
     assert git(company, "status", "--porcelain").decode() == ""
 
     # 未コミットの手動変更を作成
@@ -368,7 +377,6 @@ def test_single_repository_commit_pending(tmp_path: Path, git_helpers) -> None:
     # コミット後状態確認（未コミット変更がクリーンになっていること）
     state_after = load_state(company, "sample-app")
     assert state_after["confirmed_sequence"] == 1
-    assert state_after["pending_sequences"] == []
     assert git(company, "status", "--porcelain").decode() == ""
     log = git(company, "log", "-1", "--pretty=%s").decode().strip()
     assert log == "[myao-patch] sample-app update"
@@ -401,7 +409,6 @@ def test_list_company_repositories(tmp_path: Path, git_helpers) -> None:
     assert "obsidian-settings" in repo_ids
     for r in repos:
         assert "clean" in r
-        assert "pending_sequences" in r
         assert "head" in r
 
 
@@ -461,7 +468,6 @@ def test_init_repository_sequence_and_apply_from_sequence_two(tmp_path: Path, gi
     assert state_file.is_file()
     state = load_state(company, "sample-app")
     assert state["confirmed_sequence"] == 1
-    assert state["pending_sequences"] == []
 
     # パッチZIPを適用 -> 連番1はスキップされ、連番2のみが適用・コミットされる
     apply_res = apply_archive(settings, str(zip_path))
@@ -476,7 +482,6 @@ def test_init_repository_sequence_and_apply_from_sequence_two(tmp_path: Path, gi
     assert (company / "file2.txt").read_text(encoding="utf-8") == "v2-new\n"
     state_after = load_state(company, "sample-app")
     assert state_after["confirmed_sequence"] == 2
-    assert state_after["pending_sequences"] == []
 
 
 def test_init_all_repositories_sequence(tmp_path: Path, git_helpers) -> None:
@@ -545,7 +550,7 @@ def test_apply_auto_commits_uncommitted_changes_and_immediately_commits_patch(
     git(company, "add", "-A")
     git(company, "commit", "-m", "company base")
 
-    # 未コミットの変更を作成（state.json には pending はない状態）
+    # 未コミットの変更を作成
     (company / "app.txt").write_text("v0-manual-edit\n", encoding="utf-8")
     status_before = git(company, "status", "--porcelain").decode().strip()
     assert status_before != ""  # 未コミットの変更が存在する
@@ -575,10 +580,9 @@ def test_apply_auto_commits_uncommitted_changes_and_immediately_commits_patch(
     assert (company / "app.txt").read_text(encoding="utf-8") == "v1-patch\n"
     assert (company / "added.txt").read_text(encoding="utf-8") == "new file\n"
 
-    # 検証4: state.json が confirmed_sequence: 1, pending: [] であること
+    # 検証4: state.json の confirmed_sequence が 1 であること
     state = load_state(company, "sample-app")
     assert state["confirmed_sequence"] == 1
-    assert state["pending_sequences"] == []
 
 
 def test_apply_added_files_with_crlf_lf_conversion(
@@ -589,8 +593,6 @@ def test_apply_added_files_with_crlf_lf_conversion(
     ZIP内ファイル実体（GitやアーカイブによるLF変換）で改行コード差異が発生しても、
     破損エラーと誤判定されず透過的に検証および元改行コード復元・適用されるテスト
     """
-    from rep_patch.company import inspect_archive
-
     git, init_repo = git_helpers
 
     # 自宅側: base -> patch1
@@ -656,7 +658,270 @@ def test_apply_added_files_with_crlf_lf_conversion(
     assert applied_file.read_bytes() == manifest_content
 
 
+def _source_with_history(tmp_path: Path, git, init_repo, versions: list[str]) -> tuple[Path, list[str]]:
+    """app.txt を versions の順に書き換えてコミットした自宅側リポジトリと、各コミットIDを返す"""
+    source = init_repo(tmp_path / "source")
+    commits = []
+    for index, content in enumerate(versions):
+        (source / "app.txt").write_text(content, encoding="utf-8")
+        git(source, "add", "-A")
+        git(source, "commit", "-m", f"v{index}")
+        commits.append(git(source, "rev-parse", "HEAD").decode().strip())
+    return source, commits
 
 
+def _company_repo(tmp_path: Path, git, init_repo, content: str, name: str = "sample-app") -> Path:
+    company = init_repo(tmp_path / "company-apps" / name)
+    (company / "app.txt").write_text(content, encoding="utf-8")
+    git(company, "add", "-A")
+    git(company, "commit", "-m", "company base")
+    return company
 
 
+def _company_settings(tmp_path: Path, zip_path: Path) -> Settings:
+    return Settings(
+        mode="company",
+        company_apps_root=str(tmp_path / "company-apps"),
+        download_dir=str(zip_path.parent),
+        patch_password=PASSWORD,
+    )
+
+
+def test_apply_patch_whose_content_already_matches_advances_sequence(tmp_path: Path, git_helpers) -> None:
+    """会社側で同じ修正を手で入れてコミット済みでも、以降のパッチが止まらない"""
+    git, init_repo = git_helpers
+    source, (c0, c1, c2) = _source_with_history(tmp_path, git, init_repo, ["v0\n", "v1\n", "v2\n"])
+    company = _company_repo(tmp_path, git, init_repo, "v1\n")  # 連番1の内容を既に持っている
+    head_before = git(company, "rev-parse", "HEAD")
+
+    first = make_package_repo(tmp_path / "first", source, git, [(c0, c1)])
+    settings = _company_settings(tmp_path, first)
+    result = apply_archive(settings, str(first))
+
+    assert result["failed"] == 0
+    assert result["results"][0]["status"] == "applied"
+    assert "既に一致" in result["results"][0]["message"]
+    assert load_state(company, "sample-app")["confirmed_sequence"] == 1
+    assert git(company, "rev-parse", "HEAD") == head_before  # 空のコミットは作らない
+    assert git(company, "status", "--porcelain").decode() == ""
+
+    # 続く連番2は通常どおり適用・コミットされる
+    second = make_package_repo(tmp_path / "second", source, git, [(c0, c1), (c1, c2)])
+    settings.download_dir = str(second.parent)
+    result = apply_archive(settings, str(second))
+    assert result["results"][0]["status"] == "applied"
+    assert (company / "app.txt").read_text(encoding="utf-8") == "v2\n"
+    assert git(company, "log", "-1", "--pretty=%s").decode().strip() == "[myao-patch] sample-app patch-000002"
+
+
+@pytest.mark.parametrize("fail_after_commit", [False, True])
+def test_failed_apply_restores_pre_apply_commit_and_files(
+    tmp_path: Path, git_helpers, monkeypatch: pytest.MonkeyPatch, fail_after_commit: bool
+) -> None:
+    git, init_repo = git_helpers
+    source = init_repo(tmp_path / "source")
+    (source / "app.txt").write_text("v0\n", encoding="utf-8")
+    (source / "gone.txt").write_text("to be deleted\n", encoding="utf-8")
+    (source / ".gitignore").write_text("local.json\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "v0")
+    c0 = git(source, "rev-parse", "HEAD").decode().strip()
+    (source / "app.txt").write_text("v1\n", encoding="utf-8")
+    (source / "gone.txt").unlink()
+    (source / "new").mkdir()
+    (source / "new" / "added.txt").write_text("added\n", encoding="utf-8")
+    (source / ".gitignore").write_text("", encoding="utf-8")
+    (source / "local.json").write_text("{\"from\": \"home\"}\n", encoding="utf-8")
+    git(source, "add", "-A")
+    git(source, "commit", "-m", "v1")
+    c1 = git(source, "rev-parse", "HEAD").decode().strip()
+
+    company = init_repo(tmp_path / "company-apps" / "sample-app")
+    (company / "app.txt").write_text("v0\n", encoding="utf-8")
+    (company / "gone.txt").write_text("to be deleted\n", encoding="utf-8")
+    (company / ".gitignore").write_text("local.json\n", encoding="utf-8")
+    git(company, "add", "-A")
+    git(company, "commit", "-m", "company base")
+    # 会社側ではGit管理外（.gitignore対象）のローカル設定。パッチが同じパスを上書きしようとする
+    (company / "local.json").write_text("{\"from\": \"company\"}\n", encoding="utf-8")
+    head_before = git(company, "rev-parse", "HEAD")
+
+    zip_path = make_package_repo(tmp_path / "package", source, git, [(c0, c1)])
+    settings = _company_settings(tmp_path, zip_path)
+
+    with monkeypatch.context() as patched:
+        if fail_after_commit:
+            # コミット成功後の最終確認で失敗させる（1回目は適用前の確認なので通す）
+            calls = {"count": 0}
+            original = company_module._ensure_clean
+
+            def failing_ensure_clean(repo: Path) -> None:
+                calls["count"] += 1
+                if calls["count"] >= 2:
+                    raise RepPatchError("simulated failure after commit")
+                original(repo)
+
+            patched.setattr(company_module, "_ensure_clean", failing_ensure_clean)
+        else:
+            # ファイル配置後、コミットの時点で失敗させる
+            def failing_commit(repo: Path, message: str) -> bool:
+                raise RepPatchError("simulated failure before commit")
+
+            patched.setattr(company_module, "_commit_staged", failing_commit)
+
+        result = apply_archive(settings, str(zip_path))
+
+    assert result["failed"] == 1
+    assert "simulated failure" in result["results"][0]["message"]
+    assert git(company, "rev-parse", "HEAD") == head_before
+    assert (company / "app.txt").read_text(encoding="utf-8") == "v0\n"
+    assert (company / "gone.txt").read_text(encoding="utf-8") == "to be deleted\n"
+    assert not (company / "new" / "added.txt").exists()
+    assert (company / "local.json").read_text(encoding="utf-8") == "{\"from\": \"company\"}\n"
+    assert git(company, "status", "--porcelain").decode() == ""
+    assert load_state(company, "sample-app")["confirmed_sequence"] == 0
+    backups = company / ".git" / "rep-patch" / "backups"
+    assert not backups.exists() or list(backups.iterdir()) == []
+
+    # 原因が解消されれば、同じZIPをそのまま再適用できる
+    result = apply_archive(settings, str(zip_path))
+    assert result["failed"] == 0
+    assert (company / "app.txt").read_text(encoding="utf-8") == "v1\n"
+    assert not (company / "gone.txt").exists()
+
+
+def test_apply_reports_missing_sequence(tmp_path: Path, git_helpers) -> None:
+    git, init_repo = git_helpers
+    source, (c0, c1, c2) = _source_with_history(tmp_path, git, init_repo, ["v0\n", "v1\n", "v2\n"])
+    company = _company_repo(tmp_path, git, init_repo, "v0\n")
+    zip_path = make_package_repo(tmp_path / "package", source, git, [(c0, c1), (c1, c2)])
+    settings = _company_settings(tmp_path, zip_path)
+
+    # 会社側は連番1が未適用なのに、連番2しか含まないZIPを作る
+    only_second = tmp_path / "only-second"
+    only_second.mkdir()
+    partial = only_second / "myao_app_patch-main.zip"
+    with zipfile.ZipFile(zip_path) as src, zipfile.ZipFile(partial, "w") as dst:
+        index_name = next(name for name in src.namelist() if name.endswith("package-index.json"))
+        index = json.loads(src.read(index_name))
+        index["packages"] = [item for item in index["packages"] if item["sequence"] == 2]
+        signed = sign_document({k: v for k, v in index.items() if k != "signature"}, PASSWORD)
+        dst.writestr(index_name, json.dumps(signed))
+        for name in src.namelist():
+            if "/000002/" in name:
+                dst.writestr(name, src.read(name))
+    settings.download_dir = str(only_second)
+
+    result = apply_archive(settings, str(partial))
+    assert result["failed"] == 1
+    assert "必要: 000001、検出: 000002" in result["results"][0]["message"]
+    assert (company / "app.txt").read_text(encoding="utf-8") == "v0\n"
+
+
+def test_legacy_pending_state_is_committed_as_confirmed(tmp_path: Path, git_helpers) -> None:
+    """旧バージョン（適用後に未コミットで保持する方式）の state.json からでも続きの連番を適用できる"""
+    git, init_repo = git_helpers
+    source, (c0, c1, c2) = _source_with_history(tmp_path, git, init_repo, ["v0\n", "v1\n", "v2\n"])
+    company = _company_repo(tmp_path, git, init_repo, "v0\n")
+    # 旧バージョンが連番1を適用し、未コミットのまま残した状態
+    (company / "app.txt").write_text("v1\n", encoding="utf-8")
+    save_state(
+        company,
+        {
+            "version": 1,
+            "repo_id": "sample-app",
+            "confirmed_sequence": 0,
+            "pending_sequences": [1],
+            "pending_target_files": [],
+            "pending_changed_paths": ["app.txt"],
+            "pre_apply_head": "",
+            "backup_dir": "",
+        },
+    )
+    zip_path = make_package_repo(tmp_path / "package", source, git, [(c0, c1), (c1, c2)])
+    settings = _company_settings(tmp_path, zip_path)
+
+    result = apply_archive(settings, str(zip_path))
+
+    assert result["failed"] == 0
+    assert result["results"][0]["confirmed_sequence"] == 2
+    logs = git(company, "log", "-2", "--pretty=%s").decode().strip().splitlines()
+    assert logs == ["[myao-patch] sample-app patch-000002", "[myao-patch] sample-app patch-000001"]
+    state = load_state(company, "sample-app")
+    assert state["confirmed_sequence"] == 2
+    assert "pending_sequences" not in state
+
+
+def test_excluded_repository_is_skipped_but_can_be_applied_individually(tmp_path: Path, git_helpers) -> None:
+    git, init_repo = git_helpers
+    source, (c0, c1) = _source_with_history(tmp_path, git, init_repo, ["v0\n", "v1\n"])
+    company = _company_repo(tmp_path, git, init_repo, "v0\n")
+    zip_path = make_package_repo(tmp_path / "package", source, git, [(c0, c1)])
+    settings = _company_settings(tmp_path, zip_path)
+    settings.company_excluded_repo_ids = ["sample-app"]
+
+    assert list_company_repositories(settings) == []
+    result = apply_archive(settings, str(zip_path))
+    assert result["results"][0]["status"] == "unchanged"
+    assert "除外" in result["results"][0]["message"]
+    assert (company / "app.txt").read_text(encoding="utf-8") == "v0\n"
+
+    result = apply_archive(settings, str(zip_path), only_repo_id="sample-app")
+    assert result["results"][0]["status"] == "applied"
+    assert (company / "app.txt").read_text(encoding="utf-8") == "v1\n"
+
+    # 2回目は新しいパッチが無い
+    result = apply_archive(settings, str(zip_path), only_repo_id="sample-app")
+    assert result["results"][0]["status"] == "unchanged"
+
+
+def test_retry_for_repository_not_in_archive_reports_unchanged(tmp_path: Path, git_helpers) -> None:
+    git, init_repo = git_helpers
+    source, (c0, c1) = _source_with_history(tmp_path, git, init_repo, ["v0\n", "v1\n"])
+    _company_repo(tmp_path, git, init_repo, "v0\n")
+    zip_path = make_package_repo(tmp_path / "package", source, git, [(c0, c1)])
+    settings = _company_settings(tmp_path, zip_path)
+
+    result = apply_archive(settings, str(zip_path), only_repo_id="other-app")
+    assert [item["status"] for item in result["results"]] == ["unchanged"]
+    assert result["results"][0]["repo_id"] == "other-app"
+    assert "含まれていません" in result["results"][0]["message"]
+
+
+def test_download_listing_and_zip_location_guard(tmp_path: Path, git_helpers) -> None:
+    git, init_repo = git_helpers
+    source, (c0, c1) = _source_with_history(tmp_path, git, init_repo, ["v0\n", "v1\n"])
+    zip_path = make_package_repo(tmp_path / "downloads", source, git, [(c0, c1)])
+    (zip_path.parent / "unrelated.zip").write_bytes(b"PK")
+    (zip_path.parent / "myao_app_patch_notes.txt").write_text("not a zip", encoding="utf-8")
+    settings = _company_settings(tmp_path, zip_path)
+
+    assert [item["name"] for item in list_download_packages(settings)] == ["myao_app_patch-main.zip"]
+    settings.download_dir = str(tmp_path / "missing")
+    assert list_download_packages(settings) == []
+
+    # ダウンロードフォルダの外にあるZIPや、ZIP以外は受け付けない
+    settings.download_dir = str(tmp_path / "elsewhere")
+    (tmp_path / "elsewhere").mkdir()
+    with pytest.raises(PackageValidationError, match="ダウンロードフォルダ内"):
+        inspect_archive(settings, str(zip_path))
+    settings.download_dir = str(zip_path.parent)
+    with pytest.raises(PackageValidationError, match="ZIPが見つかりません"):
+        inspect_archive(settings, str(zip_path.parent / "myao_app_patch_notes.txt"))
+    with pytest.raises(PackageValidationError, match="ZIPを開けません"):
+        inspect_archive(settings, str(zip_path.parent / "unrelated.zip"))
+
+
+def test_inspect_reports_unmapped_repository(tmp_path: Path, git_helpers) -> None:
+    git, init_repo = git_helpers
+    source, (c0, c1) = _source_with_history(tmp_path, git, init_repo, ["v0\n", "v1\n"])
+    zip_path = make_package_repo(tmp_path / "package", source, git, [(c0, c1)])
+    (tmp_path / "company-apps").mkdir()
+    settings = _company_settings(tmp_path, zip_path)
+
+    summary = inspect_archive(settings, str(zip_path))
+    assert summary["repositories"][0]["company_path"] == ""
+    assert "会社側リポジトリが見つかりません" in summary["repositories"][0]["mapping_error"]
+
+    result = apply_archive(settings, str(zip_path))
+    assert result["failed"] == 1

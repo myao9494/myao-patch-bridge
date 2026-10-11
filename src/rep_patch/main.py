@@ -3,6 +3,7 @@ Myao Patch Bridge CLI エントリポイント
 
 仕様:
 - 設定ファイル（settings.local.json）の読み込みおよびコマンドライン引数によるオーバーライド
+  （オーバーライドはこの起動の間だけ有効で、設定ファイルには書き込まない）
 - 待受ホスト（--host, --allow-vpn）、待受ポート（--port）の指定
 - ブラウザ自動起動（--no-browser で無効化可能）
 - uvicorn によるWebサーバー起動
@@ -10,7 +11,6 @@ Myao Patch Bridge CLI エントリポイント
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
 import shutil
 import subprocess
@@ -21,7 +21,7 @@ from pathlib import Path
 import uvicorn
 
 from .api import create_app
-from .config import SettingsStore
+from .config import SettingsStore, allows_remote_clients, resolve_bind_host
 
 
 def detect_tailscale_dns_name() -> str | None:
@@ -74,22 +74,16 @@ def main() -> None:
         overrides["listen_port"] = args.port
 
     store = SettingsStore(overrides=overrides)
-    settings = store.load()
+    settings = store.load_effective()
 
-    # 待受アドレスの解決:
     # ホスト名が指定された場合は 0.0.0.0 でバインドし、Tailscale等のドメイン宛て通信を確実に受信
-    bind_host = settings.listen_host
-    try:
-        ipaddress.ip_address(bind_host)
-    except ValueError:
-        bind_host = "127.0.0.1" if bind_host == "localhost" else "0.0.0.0"
-
+    bind_host = resolve_bind_host(settings.listen_host)
     browser_host = "127.0.0.1" if bind_host in {"0.0.0.0", "::"} else bind_host
     browser_url = f"http://{browser_host}:{settings.listen_port}"
 
     print("Myao Patch Bridge を起動しています...")
     print(f"ローカルアクセスURL: {browser_url}")
-    if settings.listen_host not in {"127.0.0.1", "localhost", "::1"}:
+    if allows_remote_clients(settings.listen_host):
         print(f"VPN/ネットワーク待受ホスト: {settings.listen_host}:{settings.listen_port}")
         tailscale_dns = detect_tailscale_dns_name()
         if tailscale_dns:

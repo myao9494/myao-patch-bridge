@@ -3,30 +3,39 @@
 
 仕様:
 - list_download_packages: ダウンロードフォルダからパッチZIP一覧を取得
-- list_company_repositories: 会社側で登録・検出されたリポジトリ一覧および未コミット・保留状態を取得（除外リポジトリをフィルタ）
+- list_company_repositories: 会社側で登録・検出されたリポジトリ一覧と状態を取得（除外リポジトリをフィルタ）
 - delete_company_repository: 指定リポジトリを会社側の管理対象・一覧から除外
 - inspect_archive: ZIP内の署名・SHA-256・メタデータおよび会社側リポジトリ対応状況を検証
-- apply_archive: 各アプリへパッチを適用（変更・新規ファイル直接上書き配置・削除ファイル消去・事前自動コミット・即時コミット確定・安全なバックアップ保持）
-- commit_pending: 動作確認済みの保留中パッチ（一括または個別）をGitコミット
-- init_repository_sequence: 単一リポジトリの次回適用開始番号を指定し、state.jsonを即時作成・初期化
-- init_all_repositories_sequence: 会社側全リポジトリの次回適用開始番号を一括初期化
+- apply_archive: 各アプリへパッチを適用する
+  1. 未コミット変更があれば `[myao-patch] アプリ名 update` として事前に自動コミット
+  2. 連番の連続性を確認し、対象パスをバックアップ
+  3. 同梱ファイル実体を直接上書き配置し、削除対象ファイルを消去
+  4. `[myao-patch] アプリ名 patch-連番` として即時コミット
+     （内容が既に一致していて差分が無い場合はコミットせず、適用済みとして連番だけ進める）
+  5. 失敗時は適用前のコミットとバックアップから復元。リポジトリ単位で独立して処理する
+- commit_pending: 未コミットの変更（一括または個別）をGitコミット
+- init_repository_sequence / init_all_repositories_sequence: 次回適用開始番号を指定し、state.jsonを作成
+
+適用状態は `<リポジトリ>/.git/rep-patch/state.json` に確定済み連番（confirmed_sequence）として保持する。
+旧バージョンが残した「適用済み・未コミット」の連番（pending_sequences）は、次のコミット時に確定済みへ取り込む。
 """
 from __future__ import annotations
 
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import Settings, SettingsStore
+from .config import OBSIDIAN_REPO_ID, Settings, SettingsStore, repo_id_for
 from .errors import PackageValidationError, RepPatchError
 from .git import ensure_repository, repository_status, run_git
-from .home import repo_id_for
 from .packages import ArchivePackage, PatchArchive, read_json, write_json
-from .security import safe_repo_path
+from .security import safe_relative_path, safe_repo_path
 
 STATE_VERSION = 1
 GIT_USER_FALLBACK = ["-c", "user.name=Myao Patch Bridge", "-c", "user.email=patch-bridge@local"]
+_SCAN_WORKERS = 8
 
 
 def list_download_packages(settings: Settings) -> list[dict[str, Any]]:
@@ -75,13 +84,17 @@ def inspect_archive(settings: Settings, zip_path: str) -> dict[str, Any]:
         return summary
 
 
+def _has_git_dir(path: Path) -> bool:
+    return path.is_dir() and (path / ".git").exists()
+
+
 def resolve_company_repo_by_id(settings: Settings, repo_id: str, display_name: str = "") -> tuple[str, Path]:
     explicit = settings.company_repo_paths.get(repo_id)
     if explicit:
         path = Path(explicit).expanduser()
         ensure_repository(path)
         return path.name, path
-    if repo_id == "obsidian-settings":
+    if repo_id == OBSIDIAN_REPO_ID:
         if not settings.company_obsidian_repo:
             raise RepPatchError("会社側のObsidian設定リポジトリが未設定です")
         path = Path(settings.company_obsidian_repo).expanduser()
@@ -92,10 +105,10 @@ def resolve_company_repo_by_id(settings: Settings, repo_id: str, display_name: s
         if root.is_dir():
             if display_name:
                 candidate = root / display_name
-                if candidate.is_dir() and (candidate / ".git").exists():
+                if _has_git_dir(candidate):
                     return candidate.name, candidate
             for child in root.iterdir():
-                if child.is_dir() and (child / ".git").exists():
+                if _has_git_dir(child):
                     if child.name.lower() == repo_id.lower() or repo_id_for(child.name) == repo_id:
                         return child.name, child
     raise RepPatchError(f"会社側リポジトリが見つかりません: {repo_id}")
@@ -109,6 +122,10 @@ def resolve_company_repo(settings: Settings, manifest: dict[str, Any]) -> Path:
 
 
 def _git_dir(repo: Path) -> Path:
+    dot_git = repo / ".git"
+    if dot_git.is_dir():
+        return dot_git.resolve()
+    # ワークツリーやサブモジュールでは .git がファイルなので、gitに実際の場所を問い合わせる
     value = run_git(repo, ["rev-parse", "--git-dir"]).text
     path = Path(value)
     if not path.is_absolute():
@@ -120,28 +137,52 @@ def _state_path(repo: Path) -> Path:
     return _git_dir(repo) / "rep-patch" / "state.json"
 
 
+def _new_state(repo_id: str, confirmed_sequence: int = 0) -> dict[str, Any]:
+    return {
+        "version": STATE_VERSION,
+        "repo_id": repo_id,
+        "confirmed_sequence": confirmed_sequence,
+    }
+
+
 def load_state(repo: Path, repo_id: str) -> dict[str, Any]:
     path = _state_path(repo)
     if not path.exists():
-        return {
-            "version": STATE_VERSION,
-            "repo_id": repo_id,
-            "confirmed_sequence": 0,
-            "pending_sequences": [],
-            "pending_target_files": [],
-            "pending_changed_paths": [],
-            "pre_apply_head": "",
-            "backup_dir": "",
-        }
+        return _new_state(repo_id)
     state = read_json(path)
     if state.get("version") != STATE_VERSION or state.get("repo_id") != repo_id:
         raise RepPatchError(f"適用状態ファイルが不正です: {path}")
+    try:
+        state["confirmed_sequence"] = int(state.get("confirmed_sequence", 0))
+        [int(item) for item in state.get("pending_sequences", [])]
+    except (TypeError, ValueError) as exc:
+        raise RepPatchError(f"適用状態ファイルが不正です: {path}") from exc
     return state
 
 
 def save_state(repo: Path, state: dict[str, Any]) -> None:
     write_json(_state_path(repo), state)
 
+
+def _legacy_pending(state: dict[str, Any]) -> list[int]:
+    """旧バージョンが残した「適用済み・未コミット」のパッチ連番"""
+    return [int(item) for item in state.get("pending_sequences", [])]
+
+
+def _applied_sequence(state: dict[str, Any]) -> int:
+    """作業ツリーへ反映済みの最大連番（確定済みと、旧バージョンの未コミット適用分の大きい方）"""
+    return max([int(state["confirmed_sequence"]), *_legacy_pending(state)])
+
+
+def _save_confirmed(repo: Path, repo_id: str, confirmed_sequence: int) -> dict[str, Any]:
+    state = _new_state(repo_id, confirmed_sequence)
+    state["confirmed_at"] = datetime.now(timezone.utc).isoformat()
+    save_state(repo, state)
+    return state
+
+
+def _sequence_label(first: int, last: int) -> str:
+    return f"{first:06d}" if first == last else f"{first:06d}-{last:06d}"
 
 
 def _backup_paths(repo: Path, paths: list[str]) -> Path:
@@ -151,35 +192,39 @@ def _backup_paths(repo: Path, paths: list[str]) -> Path:
     target = backup_root / session
     files_dir = target / "files"
     records: list[dict[str, Any]] = []
-    for relative in sorted(set(paths)):
-        source = safe_repo_path(repo, relative)
-        if source.is_symlink():
-            raise RepPatchError(f"シンボリックリンクはパッチ対象にできません: {relative}")
-        exists = source.exists()
-        records.append({"path": relative, "existed": exists})
-        if exists:
-            if not source.is_file():
-                raise RepPatchError(f"通常ファイルではありません: {relative}")
-            destination = safe_repo_path(files_dir, relative)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-    write_json(target / "backup.json", {"paths": records})
+    try:
+        for relative in sorted(set(paths)):
+            source = safe_repo_path(repo, relative)
+            if source.is_symlink():
+                raise RepPatchError(f"シンボリックリンクはパッチ対象にできません: {relative}")
+            exists = source.exists()
+            records.append({"path": relative, "existed": exists})
+            if exists:
+                if not source.is_file():
+                    raise RepPatchError(f"通常ファイルではありません: {relative}")
+                destination = files_dir.joinpath(*safe_relative_path(relative).parts)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+        write_json(target / "backup.json", {"paths": records})
+    except BaseException:
+        shutil.rmtree(target, ignore_errors=True)
+        raise
     return target
 
 
-def _restore_backup(repo: Path, backup: Path) -> None:
+def _restore_backup(repo: Path, backup: Path, pre_apply_head: str) -> None:
+    """適用前のコミットへ戻し、Git管理外のファイルも含めて対象パスを適用前の内容へ復元する"""
+    run_git(repo, ["reset", "--hard", pre_apply_head])
     metadata = read_json(backup / "backup.json")
-    run_git(repo, ["reset", "--hard", "HEAD"])
     for record in metadata["paths"]:
         relative = record["path"]
         destination = safe_repo_path(repo, relative)
         if record["existed"]:
-            source = safe_repo_path(backup / "files", relative)
+            source = (backup / "files").joinpath(*safe_relative_path(relative).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
         else:
             destination.unlink(missing_ok=True)
-    run_git(repo, ["reset", "--mixed", "HEAD"])
 
 
 def _remove_backup(value: str) -> None:
@@ -187,7 +232,7 @@ def _remove_backup(value: str) -> None:
         return
     path = Path(value)
     if path.is_dir() and path.name and path.parent.name == "backups":
-        shutil.rmtree(path)
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _ensure_clean(repo: Path) -> None:
@@ -196,45 +241,47 @@ def _ensure_clean(repo: Path) -> None:
         raise RepPatchError("未コミットの変更があります")
 
 
-def _commit_pending(repo: Path, state: dict[str, Any], display_name: str) -> dict[str, Any]:
-    pending = state.get("pending_sequences", [])
-    status = repository_status(repo)
-    if not pending and status["clean"]:
+def _commit_staged(repo: Path, message: str) -> bool:
+    """ステージ済みの変更をコミットする。変更が無ければ何もせず False を返す。"""
+    if run_git(repo, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
+        return False
+    run_git(repo, [*GIT_USER_FALLBACK, "commit", "-m", message])
+    return True
+
+
+def _commit_worktree(repo: Path, state: dict[str, Any], display_name: str) -> dict[str, Any]:
+    """未コミットの変更をコミットして作業ツリーをクリーンにする。"""
+    pending = _legacy_pending(state)
+    if not pending and repository_status(repo)["clean"]:
         return state
     run_git(repo, ["add", "-A"])
     if pending:
-        first, last = pending[0], pending[-1]
-        suffix = f"{first:06d}" if first == last else f"{first:06d}-{last:06d}"
-        msg = f"[myao-patch] {display_name} patch-{suffix}"
-        confirmed_seq = last
+        message = f"[myao-patch] {display_name} patch-{_sequence_label(pending[0], pending[-1])}"
     else:
-        msg = f"[myao-patch] {display_name} update"
-        confirmed_seq = state.get("confirmed_sequence", 0)
-
-    run_git(repo, [*GIT_USER_FALLBACK, "commit", "-m", msg])
+        message = f"[myao-patch] {display_name} update"
+    _commit_staged(repo, message)
     _ensure_clean(repo)
-    _remove_backup(state.get("backup_dir", ""))
-    state.update(
-        {
-            "confirmed_sequence": confirmed_seq,
-            "pending_sequences": [],
-            "pending_target_files": [],
-            "pending_changed_paths": [],
-            "pre_apply_head": "",
-            "backup_dir": "",
-            "confirmed_at": datetime.now(timezone.utc).isoformat(),
-        }
-    )
-    save_state(repo, state)
-    return state
+    _remove_backup(str(state.get("backup_dir", "")))
+    return _save_confirmed(repo, str(state["repo_id"]), _applied_sequence(state))
 
 
 def _check_sequence(packages: list[ArchivePackage], expected: int) -> None:
     for package in packages:
-        sequence = int(package.manifest["sequence"])
-        if sequence != expected:
-            raise RepPatchError(f"パッチ連番が欠けています。必要: {expected:06d}、検出: {sequence:06d}")
+        if package.sequence != expected:
+            raise RepPatchError(
+                f"パッチ連番が欠けています。必要: {expected:06d}、検出: {package.sequence:06d}"
+            )
         expected += 1
+
+
+def _affected_paths(packages: list[ArchivePackage]) -> list[str]:
+    paths: list[str] = []
+    for package in packages:
+        manifest = package.manifest
+        paths.extend(manifest.get("changed_paths", []))
+        paths.extend(record["path"] for record in manifest.get("added_files") or [])
+        paths.extend(manifest.get("deleted_files", []))
+    return paths
 
 
 def _apply_packages(
@@ -242,77 +289,36 @@ def _apply_packages(
     repo: Path,
     state: dict[str, Any],
     packages: list[ArchivePackage],
-    *,
-    correction: bool,
-) -> dict[str, Any]:
-    if not packages:
-        return state
-    pending_before = list(state.get("pending_sequences", []))
-    if pending_before:
-        if not correction:
-            raise RepPatchError("前回パッチが未コミットです")
-        run_git(repo, ["add", "-A"])
-    else:
-        _ensure_clean(repo)
+) -> tuple[dict[str, Any], bool]:
+    """クリーンな作業ツリーへパッチを順に適用してコミットする。(新しい状態, コミットしたか) を返す。"""
+    _ensure_clean(repo)
+    _check_sequence(packages, int(state["confirmed_sequence"]) + 1)
+    first, last = packages[0].sequence, packages[-1].sequence
+    message = f"[myao-patch] {packages[-1].display_name} patch-{_sequence_label(first, last)}"
 
-    expected = (pending_before[-1] if pending_before else int(state["confirmed_sequence"])) + 1
-    _check_sequence(packages, expected)
-    changed = list(state.get("pending_changed_paths", []))
-    for package in packages:
-        changed.extend(package.manifest.get("changed_paths", []))
-        for item in package.manifest.get("added_files", []):
-            if isinstance(item, dict) and "path" in item:
-                changed.append(item["path"])
-        changed.extend(package.manifest.get("deleted_files", []))
-    session_backup = _backup_paths(repo, changed)
-    original_backup = state.get("backup_dir", "")
+    pre_apply_head = run_git(repo, ["rev-parse", "HEAD"]).text
+    backup = _backup_paths(repo, _affected_paths(packages))
     try:
         for package in packages:
             # 変更・新規追加ファイルの実体を直接上書き配置
-            for record in package.manifest.get("added_files", []):
-                file_rel = record["path"]
-                content = archive.read_added_file(package, file_rel)
-                target_file = safe_repo_path(repo, file_rel)
+            for record in package.manifest.get("added_files") or []:
+                target_file = safe_repo_path(repo, record["path"])
                 target_file.parent.mkdir(parents=True, exist_ok=True)
-                target_file.write_bytes(content)
+                target_file.write_bytes(archive.read_added_file(package, record["path"]))
+            # 削除対象ファイルを消去
+            for relative in package.manifest.get("deleted_files", []):
+                safe_repo_path(repo, relative).unlink(missing_ok=True)
 
-            # 削除対象ファイルを確実に消去
-            for del_rel in package.manifest.get("deleted_files", []):
-                del_target = safe_repo_path(repo, del_rel)
-                del_target.unlink(missing_ok=True)
-
-        # ワークツリーの全変更をインデックスへ反映
         run_git(repo, ["add", "-A"])
-
-        # パッチ適用と同時にGitコミットを実行し、クリーンな最新状態にする
-        first_seq = int(packages[0].manifest["sequence"])
-        last_seq = int(packages[-1].manifest["sequence"])
-        suffix = f"{first_seq:06d}" if first_seq == last_seq else f"{first_seq:06d}-{last_seq:06d}"
-        disp_name = packages[-1].manifest.get("display_name") or repo.name
-        msg = f"[myao-patch] {disp_name} patch-{suffix}"
-        run_git(repo, [*GIT_USER_FALLBACK, "commit", "-m", msg])
+        committed = _commit_staged(repo, message)
         _ensure_clean(repo)
-        _remove_backup(str(session_backup))
-        if original_backup:
-            _remove_backup(original_backup)
     except Exception:
-        _restore_backup(repo, session_backup)
-        shutil.rmtree(session_backup, ignore_errors=True)
+        _restore_backup(repo, backup, pre_apply_head)
         raise
+    finally:
+        shutil.rmtree(backup, ignore_errors=True)
 
-    state.update(
-        {
-            "confirmed_sequence": last_seq,
-            "pending_sequences": [],
-            "pending_target_files": [],
-            "pending_changed_paths": [],
-            "pre_apply_head": "",
-            "backup_dir": "",
-            "confirmed_at": datetime.now(timezone.utc).isoformat(),
-        }
-    )
-    save_state(repo, state)
-    return state
+    return _save_confirmed(repo, str(state["repo_id"]), last), committed
 
 
 def _result(repo_id: str, display_name: str, status: str, message: str, **extra: Any) -> dict[str, Any]:
@@ -325,110 +331,124 @@ def _result(repo_id: str, display_name: str, status: str, message: str, **extra:
     }
 
 
+def _apply_repository(
+    settings: Settings, archive: PatchArchive, repo_id: str, packages: list[ArchivePackage]
+) -> dict[str, Any]:
+    latest = packages[-1]
+    display_name = latest.display_name
+    repo = resolve_company_repo(settings, latest.manifest)
+    state = load_state(repo, repo_id)
+    new_packages = [item for item in packages if item.sequence > _applied_sequence(state)]
+    if not new_packages:
+        return _result(repo_id, display_name, "unchanged", "新しいパッチはありません")
+    # 未コミットの変更（手動編集や旧バージョンの適用残り）を先にコミットしてクリーンにする
+    state = _commit_worktree(repo, state, display_name)
+    state, committed = _apply_packages(archive, repo, state, new_packages)
+    message = (
+        "パッチを適用し、最新コミットとして反映しました。"
+        if committed
+        else "内容は既に一致していたため、コミットは作らず適用済みとして記録しました。"
+    )
+    return _result(
+        repo_id, display_name, "applied", message, confirmed_sequence=state["confirmed_sequence"]
+    )
+
+
 def apply_archive(
     settings: Settings,
     zip_path: str,
     *,
     only_repo_id: str | None = None,
-    correction: bool = False,
 ) -> dict[str, Any]:
     path = _allowed_zip(settings, zip_path)
     results: list[dict[str, Any]] = []
     with PatchArchive(path, settings.patch_password) as archive:
-        for repo_id, all_packages in archive.package_groups().items():
+        groups = archive.package_groups()
+        if only_repo_id and only_repo_id not in groups:
+            results.append(
+                _result(only_repo_id, only_repo_id, "unchanged", "このZIPには対象アプリのパッチが含まれていません")
+            )
+        for repo_id, packages in groups.items():
             if only_repo_id and repo_id != only_repo_id:
                 continue
-            latest_manifest = all_packages[-1].manifest
-            display_name = latest_manifest["display_name"]
+            display_name = packages[-1].display_name
             if not only_repo_id and repo_id in settings.company_excluded_repo_ids:
-                results.append(_result(repo_id, display_name, "unchanged", "会社側の管理対象外（除外設定中）のためスキップしました"))
+                results.append(
+                    _result(repo_id, display_name, "unchanged", "会社側の管理対象外（除外設定中）のためスキップしました")
+                )
                 continue
             try:
-                repo = resolve_company_repo(settings, latest_manifest)
-                state = load_state(repo, repo_id)
-                last_pending = state["pending_sequences"][-1] if state["pending_sequences"] else 0
-                current = max(int(state["confirmed_sequence"]), int(last_pending))
-                new_packages = [item for item in all_packages if int(item.manifest["sequence"]) > current]
-                if not new_packages:
-                    results.append(_result(repo_id, display_name, "unchanged", "新しいパッチはありません"))
-                    continue
-                # 未コミットの変更がある場合、または保留中パッチがある場合は事前にコミットしてクリーンにする
-                repo_stat = repository_status(repo)
-                if (state.get("pending_sequences") or not repo_stat["clean"]) and not correction:
-                    state = _commit_pending(repo, state, display_name)
-                state = _apply_packages(
-                    archive, repo, state, new_packages, correction=correction
-                )
-                results.append(
-                    _result(
-                        repo_id,
-                        display_name,
-                        "applied",
-                        "パッチを適用し、最新コミットとして反映しました。",
-                        confirmed_sequence=state.get("confirmed_sequence", 0),
-                    )
-                )
+                results.append(_apply_repository(settings, archive, repo_id, packages))
             except Exception as exc:  # noqa: BLE001 - isolate failures per repository
                 results.append(_result(repo_id, display_name, "failed", str(exc)))
     failed = sum(item["status"] == "failed" for item in results)
     return {"results": results, "failed": failed, "succeeded": len(results) - failed}
 
 
-def list_company_repositories(settings: Settings) -> list[dict[str, Any]]:
+def _company_candidates(settings: Settings) -> dict[str, tuple[str, Path, str]]:
+    """会社側で管理対象になり得るリポジトリ（repo_id → 表示名・パス・種類）"""
     candidates: dict[str, tuple[str, Path, str]] = {}
     if settings.company_apps_root:
         root = Path(settings.company_apps_root).expanduser()
         if root.is_dir():
             for child in sorted(root.iterdir()):
-                if child.is_dir() and (child / ".git").exists():
-                    r_id = repo_id_for(child.name)
-                    candidates[r_id] = (child.name, child, "app")
+                if _has_git_dir(child):
+                    candidates[repo_id_for(child.name)] = (child.name, child, "app")
     if settings.company_obsidian_repo:
         obsidian = Path(settings.company_obsidian_repo).expanduser()
-        if obsidian.is_dir() and (obsidian / ".git").exists():
-            candidates["obsidian-settings"] = (obsidian.name, obsidian, "obsidian")
-    for r_id, p_str in settings.company_repo_paths.items():
-        p = Path(p_str).expanduser()
-        if p.is_dir() and (p / ".git").exists():
-            kind = "obsidian" if "obsidian" in p.name.lower() else "app"
-            candidates[r_id] = (p.name, p, kind)
+        if _has_git_dir(obsidian):
+            candidates[OBSIDIAN_REPO_ID] = (obsidian.name, obsidian, "obsidian")
+    for repo_id, value in settings.company_repo_paths.items():
+        path = Path(value).expanduser()
+        if _has_git_dir(path):
+            kind = "obsidian" if "obsidian" in path.name.lower() else "app"
+            candidates[repo_id] = (path.name, path, kind)
+    return candidates
 
-    results: list[dict[str, Any]] = []
+
+def _describe_repository(repo_id: str, display_name: str, path: Path, kind: str) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "repo_id": repo_id,
+        "display_name": display_name,
+        "path": str(path),
+        "kind": kind,
+        "clean": False,
+        "changes": 0,
+        "head": "",
+        "branch": "",
+        "confirmed_sequence": 0,
+        "error": "",
+    }
+    try:
+        status = repository_status(path)
+        state = load_state(path, repo_id)
+        item.update(
+            {
+                "clean": status["clean"],
+                "changes": status["changes"],
+                "head": status["head"],
+                "branch": status["branch"],
+                "confirmed_sequence": int(state["confirmed_sequence"]),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - report the error on the repository card
+        item["error"] = str(exc)
+    return item
+
+
+def list_company_repositories(settings: Settings) -> list[dict[str, Any]]:
     excluded = set(settings.company_excluded_repo_ids)
-    for repo_id, (display_name, path, kind) in sorted(candidates.items(), key=lambda item: item[1][0].lower()):
-        if repo_id in excluded:
-            continue
-        try:
-            status = repository_status(path)
-            state = load_state(path, repo_id)
-            results.append({
-                "repo_id": repo_id,
-                "display_name": display_name,
-                "path": str(path),
-                "kind": kind,
-                "clean": bool(status["clean"]),
-                "changes": int(status["changes"]),
-                "head": str(status["head"]),
-                "branch": str(status["branch"]),
-                "confirmed_sequence": int(state.get("confirmed_sequence", 0)),
-                "pending_sequences": list(state.get("pending_sequences", [])),
-                "error": "",
-            })
-        except Exception as exc:  # noqa: BLE001
-            results.append({
-                "repo_id": repo_id,
-                "display_name": display_name,
-                "path": str(path),
-                "kind": kind,
-                "clean": False,
-                "changes": 0,
-                "head": "",
-                "branch": "",
-                "confirmed_sequence": 0,
-                "pending_sequences": [],
-                "error": str(exc),
-            })
-    return results
+    targets = [
+        (repo_id, display_name, path, kind)
+        for repo_id, (display_name, path, kind) in sorted(
+            _company_candidates(settings).items(), key=lambda item: item[1][0].lower()
+        )
+        if repo_id not in excluded
+    ]
+    if not targets:
+        return []
+    with ThreadPoolExecutor(max_workers=min(_SCAN_WORKERS, len(targets))) as executor:
+        return list(executor.map(lambda target: _describe_repository(*target), targets))
 
 
 def delete_company_repository(
@@ -453,42 +473,27 @@ def commit_pending(settings: Settings, repo_id: str | None = None) -> dict[str, 
         display_name, path = resolve_company_repo_by_id(settings, repo_id)
         candidates.append((repo_id, display_name, path))
     else:
-        repo_list = list_company_repositories(settings)
-        for item in repo_list:
+        for item in list_company_repositories(settings):
             if not item.get("error"):
                 candidates.append((item["repo_id"], item["display_name"], Path(item["path"])))
 
     for candidate_id, display_name, repo in candidates:
         try:
             state = load_state(repo, candidate_id)
-            status = repository_status(repo)
-            if not state.get("pending_sequences") and status["clean"]:
+            if not _legacy_pending(state) and repository_status(repo)["clean"]:
                 if repo_id:
                     results.append(_result(candidate_id, display_name, "unchanged", "コミットする変更はありません"))
                 continue
-            _commit_pending(repo, state, display_name)
-            results.append(_result(candidate_id, display_name, "committed", "確認済みパッチをコミットしました"))
+            _commit_worktree(repo, state, display_name)
+            results.append(_result(candidate_id, display_name, "committed", "未コミットの変更をコミットしました"))
         except Exception as exc:  # noqa: BLE001 - continue committing other repositories
             results.append(_result(candidate_id, display_name, "failed", str(exc)))
     return {"results": results}
 
 
-def company_status(settings: Settings, archive: PatchArchive | None = None) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    if archive:
-        manifests = [packages[-1].manifest for packages in archive.package_groups().values()]
-    else:
-        manifests = []
-    for manifest in manifests:
-        repo_id = manifest["repo_id"]
-        try:
-            repo = resolve_company_repo(settings, manifest)
-            state = load_state(repo, repo_id)
-            status = repository_status(repo)
-            result.append({**manifest, **status, "state": state, "company_path": str(repo), "error": ""})
-        except Exception as exc:  # noqa: BLE001 - return status for every repository
-            result.append({**manifest, "state": {}, "company_path": "", "error": str(exc)})
-    return result
+def _require_start_sequence(start_sequence: int) -> None:
+    if start_sequence < 1:
+        raise RepPatchError("適用開始番号は1以上の整数を指定してください")
 
 
 def init_repository_sequence(
@@ -502,41 +507,17 @@ def init_repository_sequence(
     start_sequence: 次に適用したいパッチ連番（1以上）。
     内部的には直前まで確定した扱いとして confirmed_sequence = start_sequence - 1 を記録する。
     """
-    if start_sequence < 1:
-        raise RepPatchError("適用開始番号は1以上の整数を指定してください")
-
+    _require_start_sequence(start_sequence)
     display_name, repo = resolve_company_repo_by_id(settings, repo_id)
-    confirmed_seq = start_sequence - 1
-
-    # 既存のstate.jsonがあれば読み込み、なければ初期構造を作成
-    try:
-        state = load_state(repo, repo_id)
-    except RepPatchError:
-        state = {
-            "version": STATE_VERSION,
-            "repo_id": repo_id,
-        }
-
-    state.update(
-        {
-            "version": STATE_VERSION,
-            "repo_id": repo_id,
-            "confirmed_sequence": confirmed_seq,
-            "pending_sequences": [],
-            "pending_target_files": [],
-            "pending_changed_paths": [],
-            "pre_apply_head": "",
-            "backup_dir": "",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-    )
+    confirmed_sequence = start_sequence - 1
+    state = _new_state(repo_id, confirmed_sequence)
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
     save_state(repo, state)
-
     return {
         "repo_id": repo_id,
         "display_name": display_name,
         "start_sequence": start_sequence,
-        "confirmed_sequence": confirmed_seq,
+        "confirmed_sequence": confirmed_sequence,
     }
 
 
@@ -547,16 +528,9 @@ def init_all_repositories_sequence(
     """
     会社側の全検出リポジトリに対して一括で次回適用開始連番を設定し、state.jsonを作成する
     """
-    if start_sequence < 1:
-        raise RepPatchError("適用開始番号は1以上の整数を指定してください")
-
-    repo_list = list_company_repositories(settings)
+    _require_start_sequence(start_sequence)
     results: list[dict[str, Any]] = []
-    for item in repo_list:
+    for item in list_company_repositories(settings):
         if not item.get("error"):
-            res = init_repository_sequence(settings, item["repo_id"], start_sequence)
-            results.append(res)
+            results.append(init_repository_sequence(settings, item["repo_id"], start_sequence))
     return results
-
-
-

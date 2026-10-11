@@ -6,13 +6,28 @@
 - test_reset_repository_patches_clears_packages_and_resets_sequence: パッチ履歴リセットによりパッチ専用リポジトリの該当パッケージ削除・インデックス再署名・push・次回000001再生成の検証
 - test_publish_creates_release_bundle_and_uploads_to_github: 今回分軽量ZIP生成およびGitHub Releases自動公開の検証
 - test_publish_cleans_old_packages_keeps_only_latest_and_tracks_sequence: 過去パッチの自動クリーンアップ・リポジトリ軽量化・last_sequence保持の検証
+- test_publish_without_changes_leaves_patch_repo_clean: 変更が無い公開操作でもパッチ専用リポジトリを汚さず、次回の公開を妨げない検証
+- test_publish_failure_leaves_patch_repo_clean: 設定不備や書き出し途中の失敗で作りかけのパッケージを残さない検証
+- test_publish_push_failure_is_recovered_on_next_publish: push失敗後、次回の公開操作でpushと公開済み地点が回復する検証
+- test_publish_rejects_unsupported_entries: サブモジュールを含む差分は書き出し前に拒否する検証
+- test_publish_reports_bundle_failure_without_failing: 今回分ZIPの生成失敗が公開結果を失敗にしない検証
+- test_publish_writes_bundle_into_patch_repo_dist_when_download_dir_is_empty: 出力先未設定時に dist/ へ出力し、次回公開を妨げない検証
+- test_publish_then_apply_end_to_end: 実際の公開物（リネーム・バイナリ・日本語パス・削除を含む）を会社側へ適用する通し検証
+- test_reset_requires_clean_patch_repo: パッチ専用リポジトリに未コミットの変更がある場合はリセットしない検証
 """
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
+import pytest
+
+import rep_patch.home as home_module
+from helpers import commit_all, git, init_repo, make_patch_repo
+from rep_patch.company import apply_archive, load_state
 from rep_patch.config import RepositoryConfig, Settings, SettingsStore
+from rep_patch.errors import RepPatchError
 from rep_patch.home import publish, reset_repository_patches
 from rep_patch.security import verify_document
 
@@ -213,7 +228,6 @@ def test_publish_creates_release_bundle_and_uploads_to_github(
     (source / "app.txt").write_text("v2\n", encoding="utf-8")
     git(source, "add", "-A")
     git(source, "commit", "-m", "v2")
-    target = git(source, "rev-parse", "HEAD").decode().strip()
 
     remote = tmp_path / "patch-remote.git"
     remote.mkdir()
@@ -384,7 +398,7 @@ def test_publish_cleans_old_packages_keeps_only_latest_and_tracks_sequence(
     # 1回目のパッチZIPを会社側download_dirに置いて適用
     res1_copied = company_download_dir / Path(res1["bundle_path"]).name
     shutil.copy(res1["bundle_path"], res1_copied)
-    apply_res1 = apply_archive(company_settings, str(res1_copied), correction=False)
+    apply_res1 = apply_archive(company_settings, str(res1_copied))
     assert apply_res1["results"][0]["status"] == "applied", f"Apply failed: {apply_res1['results'][0]['message']}"
     assert (company_repo / "app.txt").read_text(encoding="utf-8") == "v2\n"
     assert load_state(company_repo, "sample-app")["confirmed_sequence"] == 1
@@ -405,9 +419,249 @@ def test_publish_cleans_old_packages_keeps_only_latest_and_tracks_sequence(
     assert summary["repositories"][0]["first_sequence"] == 2
     assert summary["repositories"][0]["last_sequence"] == 2
 
-    apply_res2 = apply_archive(company_settings, str(github_dl_zip), correction=False)
+    apply_res2 = apply_archive(company_settings, str(github_dl_zip))
     assert apply_res2["results"][0]["status"] == "applied"
     # ファイルが正しくv3に更新され、連番が2に確定コミットされていること
     assert (company_repo / "app.txt").read_text(encoding="utf-8") == "v3\n"
     assert load_state(company_repo, "sample-app")["confirmed_sequence"] == 2
     assert git(company_repo, "status", "--porcelain=v1").decode().strip() == ""
+
+
+def _home_setup(tmp_path: Path, names: tuple[str, ...] = ("sample-app",)) -> tuple[SettingsStore, Path, dict[str, Path]]:
+    """公開済み地点（baseline）を持つ自宅側リポジトリ群と、リモート付きパッチ専用リポジトリを用意する"""
+    patch_repo = make_patch_repo(tmp_path)
+    sources: dict[str, Path] = {}
+    repositories: dict[str, RepositoryConfig] = {}
+    for name in names:
+        source = init_repo(tmp_path / "source" / name)
+        (source / "app.txt").write_text("v1\n", encoding="utf-8")
+        baseline = commit_all(source, "v1")
+        sources[name] = source
+        repositories[name] = RepositoryConfig(
+            repo_id=name, display_name=name, path=str(source), branch="main", baseline_commit=baseline
+        )
+    store = SettingsStore(tmp_path / "data" / "settings.local.json")
+    store.save(
+        Settings(
+            mode="home",
+            patch_repo=str(patch_repo),
+            patch_password="test-password",
+            download_dir=str(tmp_path / "bundles"),
+            repositories=repositories,
+        )
+    )
+    return store, patch_repo, sources
+
+
+def _status(repo: Path) -> str:
+    return git(repo, "status", "--porcelain=v1").decode().strip()
+
+
+def test_publish_without_changes_leaves_patch_repo_clean(tmp_path: Path) -> None:
+    store, patch_repo, sources = _home_setup(tmp_path)
+
+    result = publish(store.load(), store)
+    assert result["published"] is False
+    assert _status(patch_repo) == ""
+
+    # 直後の公開が「未コミットの変更があります」で止まらない
+    (sources["sample-app"] / "app.txt").write_text("v2\n", encoding="utf-8")
+    commit_all(sources["sample-app"], "v2")
+    assert publish(store.load(), store)["published"] is True
+    assert _status(patch_repo) == ""
+    assert "packages/** binary" in (patch_repo / ".gitattributes").read_text(encoding="utf-8")
+
+
+def test_publish_failure_leaves_patch_repo_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, patch_repo, sources = _home_setup(tmp_path, ("app-a", "app-b"))
+    for source in sources.values():
+        (source / "app.txt").write_text("v2\n", encoding="utf-8")
+        commit_all(source, "v2")
+    head_before = git(patch_repo, "rev-parse", "HEAD")
+
+    # 1. 設定不備（初期導入コミット未設定）は、何も書き出す前に検出する
+    settings = store.load()
+    settings.repositories["app-b"].baseline_commit = ""
+    store.save(settings)
+    with pytest.raises(RepPatchError, match="初期導入コミットが未設定です"):
+        publish(store.load(), store)
+    assert _status(patch_repo) == ""
+
+    # 2. 2つ目のリポジトリの書き出し途中で失敗しても、1つ目の作りかけを残さない
+    settings.repositories["app-b"].baseline_commit = git(
+        sources["app-b"], "rev-parse", "HEAD~1"
+    ).decode().strip()
+    store.save(settings)
+    original = home_module.split_patch
+    calls = {"count": 0}
+
+    def failing_split(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("disk full")
+        return original(*args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(home_module, "split_patch", failing_split)
+        with pytest.raises(OSError, match="disk full"):
+            publish(store.load(), store)
+    assert _status(patch_repo) == ""
+    assert git(patch_repo, "rev-parse", "HEAD") == head_before
+    assert not (patch_repo / "packages").exists()
+    assert store.load().repositories["app-a"].published_commit == ""
+
+    # 3. 原因が解消されれば、そのまま両方を連番1で公開できる
+    result = publish(store.load(), store)
+    assert result["published"] is True
+    assert sorted((m["repo_id"], m["sequence"]) for m in result["packages"]) == [("app-a", 1), ("app-b", 1)]
+    assert _status(patch_repo) == ""
+
+
+def test_publish_push_failure_is_recovered_on_next_publish(tmp_path: Path) -> None:
+    store, patch_repo, sources = _home_setup(tmp_path)
+    source = sources["sample-app"]
+    (source / "app.txt").write_text("v2\n", encoding="utf-8")
+    target = commit_all(source, "v2")
+
+    # リモートへ届かない状態にしてpushを失敗させる
+    remote = tmp_path / "patch-remote.git"
+    hidden = tmp_path / "patch-remote.hidden"
+    remote.rename(hidden)
+    with pytest.raises(RepPatchError):
+        publish(store.load(), store)
+    assert _status(patch_repo) == ""
+    assert git(patch_repo, "rev-list", "--count", "@{u}..HEAD").decode().strip() == "1"
+    assert store.load().repositories["sample-app"].published_commit == ""  # push成功時だけ進む
+
+    # 回線が戻った後の公開操作で、残っていたコミットがpushされ、公開済み地点も追いつく
+    hidden.rename(remote)
+    result = publish(store.load(), store)
+    assert result["published"] is False  # 新しい変更は無い
+    assert git(patch_repo, "rev-list", "--count", "@{u}..HEAD").decode().strip() == "0"
+    assert store.load().repositories["sample-app"].published_commit == target
+
+    # 次のパッチは連番2になる（連番1を作り直さない）
+    (source / "app.txt").write_text("v3\n", encoding="utf-8")
+    commit_all(source, "v3")
+    result = publish(store.load(), store)
+    assert [m["sequence"] for m in result["packages"]] == [2]
+
+
+def test_publish_rejects_unsupported_entries(tmp_path: Path) -> None:
+    store, patch_repo, sources = _home_setup(tmp_path)
+    source = sources["sample-app"]
+    inner = init_repo(tmp_path / "inner")
+    (inner / "lib.txt").write_text("lib\n", encoding="utf-8")
+    commit_all(inner, "lib")
+    git(source, "-c", "protocol.file.allow=always", "submodule", "add", str(inner), "vendor/inner")
+    commit_all(source, "add submodule")
+
+    with pytest.raises(RepPatchError, match="サブモジュール"):
+        publish(store.load(), store)
+    with pytest.raises(RepPatchError, match="サブモジュール"):
+        publish(store.load(), store, skip_verification=True)
+    assert _status(patch_repo) == ""
+
+
+def test_publish_reports_bundle_failure_without_failing(tmp_path: Path) -> None:
+    store, patch_repo, sources = _home_setup(tmp_path)
+    (sources["sample-app"] / "app.txt").write_text("v2\n", encoding="utf-8")
+    target = commit_all(sources["sample-app"], "v2")
+    # 出力先がフォルダではなくファイルになっている
+    (tmp_path / "bundles").write_text("not a directory", encoding="utf-8")
+
+    result = publish(store.load(), store)
+
+    assert result["published"] is True
+    assert result["bundle_path"] == ""
+    assert result["bundle_error"]
+    assert store.load().repositories["sample-app"].published_commit == target
+
+
+def test_publish_writes_bundle_into_patch_repo_dist_when_download_dir_is_empty(tmp_path: Path) -> None:
+    store, patch_repo, sources = _home_setup(tmp_path)
+    settings = store.load()
+    settings.download_dir = ""
+    store.save(settings)
+    source = sources["sample-app"]
+
+    (source / "app.txt").write_text("v2\n", encoding="utf-8")
+    commit_all(source, "v2")
+    result = publish(store.load(), store)
+    assert Path(result["bundle_path"]).parent == patch_repo / "dist"
+    assert _status(patch_repo) == ""  # dist/ は未コミットの変更として扱われない
+
+    (source / "app.txt").write_text("v3\n", encoding="utf-8")
+    commit_all(source, "v3")
+    assert publish(store.load(), store)["published"] is True
+
+
+def test_publish_then_apply_end_to_end(tmp_path: Path) -> None:
+    """実際の公開処理が作ったZIPを、独立した履歴を持つ会社側リポジトリへ適用する"""
+    store, patch_repo, sources = _home_setup(tmp_path)
+    source = sources["sample-app"]
+    binary_v1 = bytes(range(256)) * 4
+    (source / "data.bin").write_bytes(binary_v1)
+    (source / "old_name.txt").write_text("renamed content that stays the same\n" * 5, encoding="utf-8")
+    (source / "remove_me.txt").write_text("bye\n", encoding="utf-8")
+    baseline = commit_all(source, "baseline")
+    settings = store.load()
+    settings.repositories["sample-app"].baseline_commit = baseline
+    settings.chunk_size_mib = 1
+    store.save(settings)
+
+    company = init_repo(tmp_path / "company-apps" / "sample-app")
+    for name in ("app.txt", "data.bin", "old_name.txt", "remove_me.txt"):
+        shutil.copy(source / name, company / name)
+    (company / "company_only.txt").write_text("keep me\n", encoding="utf-8")
+    commit_all(company, "company baseline")
+
+    binary_v2 = bytes(reversed(range(256))) * 4
+    crlf = b"line one\r\nline two\r\n"
+    (source / "app.txt").write_text("v2\n", encoding="utf-8")
+    (source / "data.bin").write_bytes(binary_v2)
+    (source / "crlf.txt").write_bytes(crlf)
+    (source / "日本語 フォルダ").mkdir()
+    (source / "日本語 フォルダ" / "メモ.txt").write_text("追加\n", encoding="utf-8")
+    git(source, "mv", "old_name.txt", "new_name.txt")
+    (source / "remove_me.txt").unlink()
+    commit_all(source, "v2")
+
+    result = publish(store.load(), store)
+    assert result["published"] is True
+    manifest = result["packages"][0]
+    assert "old_name.txt" in manifest["deleted_files"] and "remove_me.txt" in manifest["deleted_files"]
+
+    company_settings = Settings(
+        mode="company",
+        company_apps_root=str(tmp_path / "company-apps"),
+        patch_password="test-password",
+        download_dir=str(tmp_path / "bundles"),
+    )
+    applied = apply_archive(company_settings, result["bundle_path"])
+
+    assert applied["failed"] == 0, applied["results"]
+    assert (company / "app.txt").read_text(encoding="utf-8") == "v2\n"
+    assert (company / "data.bin").read_bytes() == binary_v2
+    assert (company / "crlf.txt").read_bytes() == crlf
+    assert (company / "日本語 フォルダ" / "メモ.txt").read_text(encoding="utf-8") == "追加\n"
+    assert (company / "new_name.txt").exists()
+    assert not (company / "old_name.txt").exists()
+    assert not (company / "remove_me.txt").exists()
+    assert (company / "company_only.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert _status(company) == ""
+    assert load_state(company, "sample-app")["confirmed_sequence"] == 1
+
+
+def test_reset_requires_clean_patch_repo(tmp_path: Path) -> None:
+    store, patch_repo, sources = _home_setup(tmp_path)
+    (sources["sample-app"] / "app.txt").write_text("v2\n", encoding="utf-8")
+    commit_all(sources["sample-app"], "v2")
+    publish(store.load(), store)
+    (patch_repo / "stray.txt").write_text("unrelated work in progress\n", encoding="utf-8")
+
+    with pytest.raises(RepPatchError, match="未コミットの変更"):
+        reset_repository_patches(store.load(), store, "sample-app")
+    assert (patch_repo / "stray.txt").exists()
+    assert (patch_repo / "packages" / "sample-app" / "000001").exists()
+    assert store.load().repositories["sample-app"].last_sequence == 1
