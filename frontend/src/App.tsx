@@ -1,67 +1,38 @@
 /**
  * Myao Patch Bridge フロントエンド アプリケーションメイン
- * 
+ *
  * 仕様:
- * - 自宅モード（HomeDashboard）:
- *   - リポジトリの自動検出（再検出）
- *   - リポジトリカードの手動追加（パス指定・ブランチ・種類・初期導入地点）
- *   - リポジトリカードの削除（管理対象からの除外）
- *   - リポジトリの有効/無効トグル（パッチ公開対象の選択）
- *   - リポジトリ設定の保存および未公開パッチの作成・公開（今回分軽量ZIP生成・GitHub Releases自動公開対応）
- *   - 会社環境シミュレーション検証（事前クリーン検証・テンプレート除外・カスタム除外パターン設定・エラー時スキップ公開）
- *   - リポジトリのパッチ履歴リセット（000001からの再作成・リモートパッチ削除・初期導入地点更新オプション）
- * - 会社モード（CompanyDashboard）:
- *   - ダウンロード済みパッチZIPの検索・選択・署名検証
- *   - 会社側リポジトリへの差分適用・復元・コミット
- *   - リポジトリカードの削除（管理対象からの除外）
- *   - 適用開始番号の指定とstate.json自動生成（個別・一括）
- *   - 会社側環境診断
- * - 共通: 設定ドロワー（待受ホスト・VPNアクセス・ポート等の設定変更）、PWAインストールプロンプト、通知・エラーバナー、エディタ起動（自宅: Antigravity、会社: VS Code）
+ * - 画面全体の状態（設定、リポジトリ一覧、選択中ZIP、処理結果など）と、API呼び出しを伴う操作をここに集約する
+ * - 表示は動作モードごとのダッシュボードへ委譲する
+ *   - 自宅モード: components/HomeDashboard（リポジトリ管理、会社環境検証、パッチ作成・公開、履歴リセット）
+ *   - 会社モード: components/CompanyDashboard（ZIP検証、適用・コミット、開始番号設定、環境診断）
+ * - 共通: 設定ドロワー、PWAインストールプロンプト、通知・エラーバナー、処理中オーバーレイ
+ * - 操作はすべて perform() を通し、処理中表示とエラー表示を統一する
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  AlertTriangle,
-  Archive,
-  Check,
-  CheckSquare,
-  ChevronRight,
-  CircleDot,
-  CloudUpload,
-  Code,
-  Download,
-  FileArchive,
-  FolderPlus,
-  GitBranch,
-  HardDrive,
-  Hash,
-  LoaderCircle,
-  Menu,
-  PackageCheck,
-  Plus,
-  RefreshCw,
-  RotateCcw,
-  Save,
-  Settings as SettingsIcon,
-  ShieldCheck,
-  Smartphone,
-  Sparkles,
-  Square,
-  Trash2,
-  X,
-} from "lucide-react";
+import { AlertTriangle, Check, CircleDot, LoaderCircle, Menu, Smartphone, X } from "lucide-react";
 import { api, jsonBody } from "./api";
-import type {
-  CleanVerificationResult,
-  CompanyRepository,
-  DownloadPackage,
-  OperationResult,
-  PackageSummary,
-  PublishResult,
-  Repository,
-  RepositoryCreatePayload,
-  ResetResult,
-  Settings,
-  VerifyAllSummary,
+import { AddRepositoryModal } from "./components/AddRepositoryModal";
+import { CompanyDashboard } from "./components/CompanyDashboard";
+import { HomeDashboard } from "./components/HomeDashboard";
+import { ResetRepositoryModal } from "./components/ResetRepositoryModal";
+import { SettingsDrawer } from "./components/SettingsDrawer";
+import { formatSequence } from "./format";
+import {
+  EDITABLE_SETTING_KEYS,
+  type CleanVerificationResult,
+  type CompanyRepository,
+  type DiagnosticsResult,
+  type DownloadPackage,
+  type OperationResult,
+  type PackageSummary,
+  type PublishResult,
+  type Repository,
+  type RepositoryCreatePayload,
+  type ResetResult,
+  type SequenceInitResult,
+  type Settings,
+  type VerifyAllSummary,
 } from "./types";
 
 const emptySettings: Settings = {
@@ -90,15 +61,13 @@ interface BeforeInstallPromptEvent extends Event {
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 }
 
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`;
-  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
-  return `${(value / 1024 ** 3).toFixed(1)} GiB`;
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
 }
 
-function shortHash(value?: string): string {
-  return value ? value.slice(0, 8) : "未設定";
+/** 設定ドロワーで編集できる項目だけを取り出す（リポジトリ登録など、他の操作が管理する値を送り返さない） */
+function editableSettings(settings: Settings): Partial<Settings> {
+  return Object.fromEntries(EDITABLE_SETTING_KEYS.map((key) => [key, settings[key]]));
 }
 
 export default function App() {
@@ -115,7 +84,7 @@ export default function App() {
   const [summary, setSummary] = useState<PackageSummary | null>(null);
   const [results, setResults] = useState<OperationResult[]>([]);
   const [companyRepos, setCompanyRepos] = useState<CompanyRepository[]>([]);
-  const [diagnostics, setDiagnostics] = useState<any>(null);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [verificationResults, setVerificationResults] = useState<Record<string, CleanVerificationResult>>({});
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
 
@@ -126,7 +95,7 @@ export default function App() {
     try {
       return await work();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
       return undefined;
     } finally {
       setBusy("");
@@ -155,16 +124,24 @@ export default function App() {
     setCompanyRepos(value.repositories);
   }, []);
 
-  useEffect(() => {
-    perform("初期化中", async () => {
-      const value = await loadSettings();
-      if (value.mode === "home") await loadRepositories().catch(() => undefined);
+  /** 動作モードに応じた一覧を読み込む（片方の失敗でもう片方を止めない） */
+  const loadModeData = useCallback(
+    async (mode: Settings["mode"]) => {
+      if (mode === "home") await loadRepositories().catch(() => undefined);
       else {
         await loadDownloads().catch(() => undefined);
         await loadCompanyRepositories().catch(() => undefined);
       }
+    },
+    [loadCompanyRepositories, loadDownloads, loadRepositories]
+  );
+
+  useEffect(() => {
+    perform("初期化中", async () => {
+      const value = await loadSettings();
+      await loadModeData(value.mode);
     });
-  }, [loadCompanyRepositories, loadDownloads, loadRepositories, loadSettings, perform]);
+  }, [loadModeData, loadSettings, perform]);
 
   useEffect(() => {
     const capture = (event: Event) => {
@@ -186,15 +163,21 @@ export default function App() {
     const updated = await perform("設定を保存中", () =>
       api<Settings>("/api/settings", {
         method: "PUT",
-        ...jsonBody({ values: settings }),
+        ...jsonBody({ values: editableSettings(settings) }),
       })
     );
     if (updated) {
       setSettings(updated);
       setDrawer(false);
-      setNotice("設定を保存しました。ポート変更は再起動後に反映されます。");
-      if (updated.mode === "company") await loadDownloads();
+      setNotice("設定を保存しました。待受ホスト・ポートの変更は再起動後に反映されます。");
+      await loadModeData(updated.mode);
     }
+  };
+
+  const closeDrawer = () => {
+    setDrawer(false);
+    // 保存せずに閉じた場合は、編集途中の値を保存済みの内容へ戻す
+    loadSettings().catch(() => undefined);
   };
 
   const discover = async () => {
@@ -213,6 +196,7 @@ export default function App() {
             enabled: repository.enabled,
             branch: repository.branch,
             baseline_commit: repository.baseline_commit,
+            clean_verify_ignore_patterns: repository.clean_verify_ignore_patterns ?? [],
           },
         }),
       })
@@ -336,7 +320,7 @@ export default function App() {
   };
 
   const publish = async () => {
-    const invalidEntries = Object.entries(verificationResults).filter(([_, r]) => !r.valid);
+    const invalidEntries = Object.entries(verificationResults).filter(([, r]) => !r.valid);
     let skipVerification = false;
     if (invalidEntries.length > 0) {
       const ok = confirm(
@@ -370,17 +354,19 @@ export default function App() {
           const force = confirm(
             `${errMsg}\n\n会社環境シミュレーション検証でエラーが検知されました。\n検証をスキップしてパッチ作成・公開を強行しますか？`
           );
-          if (force) {
-            res = await executePublish(true);
-          } else {
+          if (!force) {
             setError(errMsg);
             return;
           }
+          res = await executePublish(true);
         } else {
           throw err;
         }
       }
       let msg = res.message;
+      if (res.bundle_error) {
+        msg += `\n(今回分ZIPを作成できませんでした: ${res.bundle_error})`;
+      }
       if (res.release_url) {
         msg += `\nGitHub Releasesへ公開しました: ${res.release_url}`;
       } else if (res.release_error) {
@@ -393,7 +379,7 @@ export default function App() {
       setNotice(msg);
       await loadRepositories();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(errorMessage(reason));
     } finally {
       setBusy("");
     }
@@ -413,15 +399,13 @@ export default function App() {
     }
   };
 
-  const applyAll = async (correction = false) => {
-    const prompt = correction
-      ? "前回の未コミット変更へ、修正パッチを重ねて適用しますか？"
-      : "確認済みの前回分をコミットし、全アプリへ新しいパッチを適用しますか？";
-    if (!selectedZip || !confirm(prompt)) return;
+  const applyAll = async () => {
+    const message = "未コミットの変更があれば先にコミットし、全アプリへ新しいパッチを適用・コミットしますか？";
+    if (!selectedZip || !confirm(message)) return;
     const value = await perform("全アプリを処理中", () =>
       api<{ results: OperationResult[] }>("/api/company/apply-all", {
         method: "POST",
-        ...jsonBody({ zip_path: selectedZip, correction }),
+        ...jsonBody({ zip_path: selectedZip }),
       })
     );
     if (value) {
@@ -434,7 +418,7 @@ export default function App() {
     const value = await perform("アプリを再実行中", () =>
       api<{ results: OperationResult[] }>("/api/company/retry", {
         method: "POST",
-        ...jsonBody({ zip_path: selectedZip, repo_id: repoId, correction: false }),
+        ...jsonBody({ zip_path: selectedZip, repo_id: repoId }),
       })
     );
     if (value) {
@@ -444,8 +428,8 @@ export default function App() {
   };
 
   const commitAll = async () => {
-    if (!confirm("動作確認済みの未コミットパッチをすべてコミットしますか？")) return;
-    const value = await perform("確認済みパッチをコミット中", () =>
+    if (!confirm("全アプリの未コミットの変更をコミットしますか？")) return;
+    const value = await perform("未コミットの変更をコミット中", () =>
       api<{ results: OperationResult[] }>("/api/company/commit-pending", {
         method: "POST",
         ...jsonBody({ repo_id: null }),
@@ -473,7 +457,7 @@ export default function App() {
   const setRepoSequence = async (repoId: string, displayName: string, currentConfirmed: number) => {
     const defaultNext = currentConfirmed + 1;
     const input = prompt(
-      `【${displayName}】\n次回適用開始番号（パッチ連番）を指定してください。\n※ 連番 ${defaultNext} を指定すると、直前の #${String(defaultNext - 1).padStart(6, "0")} まで確定済みとして state.json が生成・保存されます。`,
+      `【${displayName}】\n次回適用開始番号（パッチ連番）を指定してください。\n※ 連番 ${defaultNext} を指定すると、直前の ${formatSequence(defaultNext - 1)} まで確定済みとして state.json が生成・保存されます。`,
       String(defaultNext > 1 ? defaultNext : 2)
     );
     if (!input) return;
@@ -483,7 +467,7 @@ export default function App() {
       return;
     }
     const value = await perform("適用開始番号を設定中", () =>
-      api<{ repo_id: string; start_sequence: number; confirmed_sequence: number }>(
+      api<SequenceInitResult>(
         `/api/company/repositories/${repoId}/sequence`,
         {
           method: "POST",
@@ -492,7 +476,7 @@ export default function App() {
       )
     );
     if (value) {
-      setNotice(`【${displayName}】次回適用開始番号を #${String(value.start_sequence).padStart(6, "0")} に設定し、state.json を作成しました`);
+      setNotice(`【${displayName}】次回適用開始番号を ${formatSequence(value.start_sequence)} に設定し、state.json を作成しました`);
       await loadCompanyRepositories();
     }
   };
@@ -509,19 +493,19 @@ export default function App() {
       return;
     }
     const value = await perform("全アプリの適用開始番号を一括設定中", () =>
-      api<{ results: any[] }>("/api/company/repositories/sequence-all", {
+      api<{ results: SequenceInitResult[] }>("/api/company/repositories/sequence-all", {
         method: "POST",
         ...jsonBody({ start_sequence: startSeq }),
       })
     );
     if (value) {
-      setNotice(`全リポジトリの次回適用開始番号を #${String(startSeq).padStart(6, "0")} に一括設定しました`);
+      setNotice(`全リポジトリの次回適用開始番号を ${formatSequence(startSeq)} に一括設定しました`);
       await loadCompanyRepositories();
     }
   };
 
   const runChecks = async () => {
-    const value = await perform("環境診断中", () => api<any>("/api/diagnostics"));
+    const value = await perform("環境診断中", () => api<DiagnosticsResult>("/api/diagnostics"));
     if (value) setDiagnostics(value);
   };
 
@@ -604,8 +588,7 @@ export default function App() {
             onRefresh={loadDownloads}
             onRefreshRepos={loadCompanyRepositories}
             onInspect={inspect}
-            onApply={() => applyAll(false)}
-            onCorrection={() => applyAll(true)}
+            onApply={applyAll}
             onRetry={retry}
             onCommit={commitAll}
             onCommitSingle={commitSingle}
@@ -614,7 +597,7 @@ export default function App() {
             onDeleteRepo={deleteCompanyRepository}
             onDiagnostics={runChecks}
             onOpenVsCode={openVsCode}
-            listenHost={settings.listen_host}
+            listenHost={settings.effective_listen_host ?? settings.listen_host}
           />
         )}
       </main>
@@ -634,678 +617,8 @@ export default function App() {
         />
       )}
 
-      {drawer && <SettingsDrawer settings={settings} setSettings={setSettings} onSave={saveSettings} onClose={() => setDrawer(false)} />}
+      {drawer && <SettingsDrawer settings={settings} setSettings={setSettings} onSave={saveSettings} onClose={closeDrawer} />}
       {busy && <div className="busy-overlay"><div className="busy-card"><LoaderCircle className="spin" size={30}/><strong>{busy}</strong><span>この画面を閉じないでください</span></div></div>}
     </div>
   );
-}
-
-function HomeDashboard(props: {
-  repositories: Repository[];
-  unpublished: number;
-  verificationResults: Record<string, CleanVerificationResult>;
-  onDiscover: () => void;
-  onRefresh: () => void;
-  onVerifyAll: () => void;
-  onVerifyRepo: (repo: Repository) => void;
-  onPublish: () => void;
-  onUpdateRepo: (id: string, value: Partial<Repository>) => void;
-  onSaveRepo: (repo: Repository) => void;
-  onDeleteRepo: (repo: Repository) => void;
-  onResetRepo: (repo: Repository) => void;
-  onOpenAddModal: () => void;
-  onToggleAll: (enable: boolean) => void;
-  onOpenAntigravity: (path: string) => void;
-}) {
-  const allEnabled = props.repositories.length > 0 && props.repositories.every((r) => r.enabled);
-  const someEnabled = props.repositories.some((r) => r.enabled);
-
-  return <>
-    <section className="hero home-hero">
-      <div><p className="eyebrow">PATCH PUBLISHER</p><h1>変更を、確実な<br/>受け渡し単位へ。</h1><p>対象リポジトリを選択し、登録ブランチの差分だけを安全にパッケージとして公開します。</p></div>
-      <div className="hero-stat"><span>未公開コミット</span><strong>{props.unpublished}</strong><small>{props.repositories.filter((item) => item.enabled).length} / {props.repositories.length} repos selected</small></div>
-    </section>
-    <section className="toolbar">
-      <div>
-        <h2>対象リポジトリ</h2>
-        <p>カードの追加・削除やトグルで対象を選択し、会社環境検証・ブランチ・導入地点を管理します</p>
-      </div>
-      <div className="button-row wrap">
-        <button className="button primary" onClick={props.onOpenAddModal}>
-          <Plus size={17} />リポジトリを追加
-        </button>
-        <button className="button secondary" onClick={props.onVerifyAll} title="Git追跡ファイルのみを展開したクリーン環境で、設定ファイルの欠落やパッチ適用エラーがないか一括検証します">
-          <ShieldCheck size={17} />会社環境検証
-        </button>
-        <button className="button ghost" onClick={props.onDiscover}>
-          <HardDrive size={17} />再検出
-        </button>
-        <button className="button ghost" onClick={props.onRefresh}>
-          <RefreshCw size={17} />更新
-        </button>
-        <button className="button dark" onClick={props.onPublish} disabled={!someEnabled}>
-          <CloudUpload size={17} />パッチを作成・公開
-        </button>
-      </div>
-    </section>
-
-    {props.repositories.length > 0 && (
-      <div className="selection-bar">
-        <span className="selection-count">
-          <strong>{props.repositories.filter((r) => r.enabled).length}</strong> / {props.repositories.length} 件が公開対象
-        </span>
-        <div className="selection-actions">
-          <button
-            className="text-action-button"
-            onClick={() => props.onToggleAll(true)}
-            disabled={allEnabled}
-          >
-            <CheckSquare size={14} />すべて選択
-          </button>
-          <button
-            className="text-action-button"
-            onClick={() => props.onToggleAll(false)}
-            disabled={!someEnabled}
-          >
-            <Square size={14} />すべて解除
-          </button>
-        </div>
-      </div>
-    )}
-
-    <div className="repo-grid">
-      {props.repositories.map((repo) => (
-        <article className={`repo-card ${repo.enabled ? "" : "disabled"}`} key={repo.repo_id}>
-          <div className="repo-heading">
-            <div className={`repo-icon ${repo.kind}`}><GitBranch size={20} /></div>
-            <div>
-              <h3>{repo.display_name}</h3>
-              <p>{repo.path}</p>
-            </div>
-            <div className="repo-header-actions">
-              <label className="switch" title={repo.enabled ? "パッチ作成の対象（クリックで無効化）" : "パッチ作成対象外（クリックで有効化）"}>
-                <input
-                  type="checkbox"
-                  checked={repo.enabled}
-                  onChange={(e) => {
-                    const nextVal = e.target.checked;
-                    props.onUpdateRepo(repo.repo_id, { enabled: nextVal });
-                    props.onSaveRepo({ ...repo, enabled: nextVal });
-                  }}
-                />
-                <span />
-              </label>
-              <button
-                className="icon-button delete-repo-btn"
-                title="このリポジトリカードを削除"
-                aria-label={`${repo.display_name} を削除`}
-                onClick={() => props.onDeleteRepo(repo)}
-              >
-                <Trash2 size={16} />
-              </button>
-            </div>
-          </div>
-          {repo.error ? (
-            <div className="inline-error">{repo.error}</div>
-          ) : (
-            <>
-              <div className="repo-metrics">
-                <div>
-                  <span>公開済み</span>
-                  <code>{shortHash(repo.published_commit || repo.baseline_commit)}</code>
-                </div>
-                <div>
-                  <span>現在</span>
-                  <code>{shortHash(repo.target_commit)}</code>
-                </div>
-                <div>
-                  <span>未公開</span>
-                  <strong>{repo.unpublished_commits ?? 0}</strong>
-                </div>
-              </div>
-              <label>
-                固定ブランチ
-                <input
-                  value={repo.branch}
-                  onChange={(e) => props.onUpdateRepo(repo.repo_id, { branch: e.target.value })}
-                />
-              </label>
-              <label>
-                会社の初期導入地点
-                <input
-                  placeholder="コミットID、タグ、ブランチ"
-                  value={repo.baseline_commit}
-                  onChange={(e) => props.onUpdateRepo(repo.repo_id, { baseline_commit: e.target.value })}
-                />
-              </label>
-              <label>
-                会社環境検証の除外パターン（カンマ区切り）
-                <input
-                  placeholder="backend/data/*, custom.txt 等（省略可）"
-                  value={(repo.clean_verify_ignore_patterns ?? []).join(", ")}
-                  onChange={(e) =>
-                    props.onUpdateRepo(repo.repo_id, {
-                      clean_verify_ignore_patterns: e.target.value
-                        .split(",")
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                    })
-                  }
-                />
-              </label>
-              {props.verificationResults[repo.repo_id] && (
-                <div style={{ marginTop: "10px", padding: "8px 12px", borderRadius: "6px", fontSize: "0.85rem", backgroundColor: props.verificationResults[repo.repo_id].valid ? "#e6f4ea" : "#fce8e6", color: props.verificationResults[repo.repo_id].valid ? "#137333" : "#c5221f" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: "bold" }}>
-                    {props.verificationResults[repo.repo_id].valid ? (
-                      <><Check size={16} />会社環境検証OK（設定ファイル欠落なし）</>
-                    ) : (
-                      <><AlertTriangle size={16} />会社環境でファイル不在エラーが検知されました</>
-                    )}
-                  </div>
-                  {!props.verificationResults[repo.repo_id].valid && props.verificationResults[repo.repo_id].errors.length > 0 && (
-                    <ul style={{ margin: "6px 0 0 16px", padding: 0, fontSize: "0.8rem" }}>
-                      {props.verificationResults[repo.repo_id].errors.map((err, i) => (
-                        <li key={i}>{err}</li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-              <div className="button-row" style={{ marginTop: "12px", justifyContent: "space-between", alignItems: "center" }}>
-                <button className="text-button" onClick={() => props.onSaveRepo(repo)}>
-                  <Save size={15} />この設定を保存
-                </button>
-                <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-                  <button
-                    className="button ghost small"
-                    title="会社側クリーン環境シミュレーション検証を実行"
-                    onClick={() => props.onVerifyRepo(repo)}
-                  >
-                    <ShieldCheck size={14} />検証
-                  </button>
-                  <button
-                    className="button ghost small"
-                    title="パッチ履歴をリセットして#000001から再作成可能にします"
-                    onClick={() => props.onResetRepo(repo)}
-                  >
-                    <RotateCcw size={14} />リセット
-                  </button>
-                  <button
-                    className="button ghost small"
-                    title="Antigravityで開く"
-                    onClick={() => props.onOpenAntigravity(repo.path)}
-                  >
-                    <Sparkles size={14} />Antigravityで開く
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
-        </article>
-      ))}
-      {!props.repositories.length && (
-        <EmptyState
-          icon={<Archive />}
-          title="リポジトリが登録されていません"
-          text="「リポジトリを追加」ボタンから手動登録するか、設定のアプリルートを指定して「再検出」を押してください"
-        />
-      )}
-    </div>
-  </>;
-}
-
-function ResetRepositoryModal(props: {
-  repo: Repository;
-  onClose: () => void;
-  onReset: (repo: Repository, newBaseline?: string) => Promise<void>;
-}) {
-  const [resetBaselineToHead, setResetBaselineToHead] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-
-  const handleConfirm = async () => {
-    setSubmitting(true);
-    try {
-      const newBaseline = resetBaselineToHead ? (props.repo.target_commit || undefined) : undefined;
-      await props.onReset(props.repo, newBaseline);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div className="modal-layer">
-      <button className="modal-scrim" onClick={props.onClose} aria-label="閉じる" />
-      <div className="modal-card">
-        <div className="modal-header">
-          <div>
-            <p className="eyebrow">RESET PATCHES</p>
-            <h2><RotateCcw size={20} />パッチ履歴をリセット</h2>
-          </div>
-          <button className="icon-button" onClick={props.onClose} aria-label="閉じる">
-            <X size={18} />
-          </button>
-        </div>
-        <div className="modal-body">
-          <div style={{ marginBottom: "16px" }}>
-            <p style={{ margin: "0 0 4px", fontSize: "14px", fontWeight: 600 }}>
-              対象: {props.repo.display_name}
-            </p>
-            <p style={{ margin: 0, fontSize: "12px", color: "#6b746f" }}>
-              {props.repo.path}
-            </p>
-          </div>
-
-          <div style={{
-            background: "#fffbeb",
-            border: "1px solid #fef3c7",
-            borderRadius: "4px",
-            padding: "12px 14px",
-            fontSize: "13px",
-            lineHeight: 1.6,
-            color: "#92400e",
-            marginBottom: "16px",
-          }}>
-            <strong>【注意事項】</strong>
-            <ul style={{ margin: "6px 0 0", paddingLeft: "18px" }}>
-              <li>パッチ専用リポジトリ（リモート含む）からこのリポジトリの全パッチファイルが削除されます。</li>
-              <li>次回のパッチ作成番号は <strong>#000001</strong> にリセットされます。</li>
-              <li>公開済みコミットの記録がクリアされます。</li>
-            </ul>
-          </div>
-
-          <label style={{ display: "flex", gap: "10px", alignItems: "flex-start", cursor: "pointer", fontSize: "13px" }}>
-            <input
-              type="checkbox"
-              checked={resetBaselineToHead}
-              onChange={(e) => setResetBaselineToHead(e.target.checked)}
-              style={{ marginTop: "3px" }}
-            />
-            <div>
-              <strong>現在の最新コミット ({shortHash(props.repo.target_commit)}) を会社の初期導入地点にする</strong>
-              <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#6b746f" }}>
-                {resetBaselineToHead
-                  ? "現在のHEADを初期導入地点に更新し、今後追加された変更から新しく #000001 を作成します。"
-                  : `既存の初期導入地点 (${shortHash(props.repo.baseline_commit)}) を維持し、ここからの差分で次回 #000001 を作成します。`}
-              </p>
-            </div>
-          </label>
-        </div>
-        <div className="modal-footer">
-          <button type="button" className="button ghost" onClick={props.onClose} disabled={submitting}>
-            キャンセル
-          </button>
-          <button
-            type="button"
-            className="button danger"
-            onClick={handleConfirm}
-            disabled={submitting}
-          >
-            <RotateCcw size={16} />
-            {submitting ? "リセット中..." : "パッチ履歴をリセット"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AddRepositoryModal(props: {
-  onClose: () => void;
-  onAdd: (payload: RepositoryCreatePayload) => Promise<boolean>;
-}) {
-  const [path, setPath] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [kind, setKind] = useState<"app" | "obsidian">("app");
-  const [branch, setBranch] = useState("");
-  const [baselineCommit, setBaselineCommit] = useState("");
-  const [cleanVerifyIgnorePatterns, setCleanVerifyIgnorePatterns] = useState("");
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!path.trim()) return;
-    const ignoreList = cleanVerifyIgnorePatterns
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    await props.onAdd({
-      path: path.trim(),
-      display_name: displayName.trim() || undefined,
-      kind,
-      branch: branch.trim() || undefined,
-      baseline_commit: baselineCommit.trim() || undefined,
-      clean_verify_ignore_patterns: ignoreList.length > 0 ? ignoreList : undefined,
-      enabled: true,
-    });
-  };
-
-  return (
-    <div className="modal-layer">
-      <button className="modal-scrim" onClick={props.onClose} aria-label="閉じる" />
-      <div className="modal-card">
-        <div className="modal-header">
-          <div>
-            <p className="eyebrow">ADD REPOSITORY</p>
-            <h2><FolderPlus size={20} />リポジトリを追加</h2>
-          </div>
-          <button className="icon-button" onClick={props.onClose} aria-label="閉じる">
-            <X size={18} />
-          </button>
-        </div>
-        <form onSubmit={handleSubmit}>
-          <div className="modal-body">
-            <label className="field">
-              <span>リポジトリのパス <strong className="required">*</strong></span>
-              <input
-                type="text"
-                placeholder="/Users/mine/000_work/app/my-app"
-                value={path}
-                onChange={(e) => setPath(e.target.value)}
-                required
-                autoFocus
-              />
-              <small className="field-hint">Gitリポジトリの絶対パスを入力してください</small>
-            </label>
-
-            <label className="field">
-              <span>表示名（省略時はフォルダ名）</span>
-              <input
-                type="text"
-                placeholder="my-app"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-              />
-            </label>
-
-            <div className="field">
-              <span>種類</span>
-              <div className="segmented">
-                <button
-                  type="button"
-                  className={kind === "app" ? "active" : ""}
-                  onClick={() => setKind("app")}
-                >
-                  通常アプリ (app)
-                </button>
-                <button
-                  type="button"
-                  className={kind === "obsidian" ? "active" : ""}
-                  onClick={() => setKind("obsidian")}
-                >
-                  Obsidian設定 (obsidian)
-                </button>
-              </div>
-            </div>
-
-            <label className="field">
-              <span>固定ブランチ（省略時は現在のHEAD）</span>
-              <input
-                type="text"
-                placeholder="main"
-                value={branch}
-                onChange={(e) => setBranch(e.target.value)}
-              />
-            </label>
-
-            <label className="field">
-              <span>会社の初期導入地点（省略可）</span>
-              <input
-                type="text"
-                placeholder="コミットID、タグ、ブランチ"
-                value={baselineCommit}
-                onChange={(e) => setBaselineCommit(e.target.value)}
-              />
-            </label>
-
-            <label className="field">
-              <span>会社環境検証の除外パターン（カンマ区切り・省略可）</span>
-              <input
-                type="text"
-                placeholder="backend/data/*, custom.txt 等"
-                value={cleanVerifyIgnorePatterns}
-                onChange={(e) => setCleanVerifyIgnorePatterns(e.target.value)}
-              />
-              <small className="field-hint">Git管理外のローカル固有データ等を誤検知から除外します</small>
-            </label>
-          </div>
-          <div className="modal-footer">
-            <button type="button" className="button ghost" onClick={props.onClose}>
-              キャンセル
-            </button>
-            <button type="submit" className="button primary" disabled={!path.trim()}>
-              <Plus size={16} />リポジトリを追加
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-function CompanyDashboard(props: {
-  downloads: DownloadPackage[];
-  selectedZip: string;
-  setSelectedZip: (path: string) => void;
-  summary: PackageSummary | null;
-  results: OperationResult[];
-  companyRepos: CompanyRepository[];
-  diagnostics: any;
-  onRefresh: () => void;
-  onRefreshRepos: () => void;
-  onInspect: () => void;
-  onApply: () => void;
-  onCorrection: () => void;
-  onRetry: (id: string) => void;
-  onCommit: () => void;
-  onCommitSingle: (id: string) => void;
-  onSetSequence: (repoId: string, displayName: string, currentConfirmed: number) => void;
-  onSetAllRepoSequence: () => void;
-  onDeleteRepo: (repo: CompanyRepository) => void;
-  onDiagnostics: () => void;
-  onOpenVsCode: (path: string) => void;
-  listenHost?: string;
-}) {
-  const isRemoteAllowed = props.listenHost && props.listenHost !== "127.0.0.1";
-  return <>
-    <section className="hero company-hero">
-      <div><p className="eyebrow">OFFLINE APPLIER</p><h1>確認してから、<br/>次へ進める。</h1><p>DownloadsのZIPを直接検証し、アプリ単位で安全に適用・復元します。</p></div>
-      <div className="shield">
-        <ShieldCheck size={54}/>
-        <span>{isRemoteAllowed ? "VPN / LAN" : "LOCAL ONLY"}</span>
-        <small>{props.listenHost || "127.0.0.1"}</small>
-      </div>
-    </section>
-    <section className="workspace-grid">
-      <article className="panel package-panel">
-        <div className="panel-heading"><div><p className="step">STEP 1</p><h2>パッチZIPを選択</h2></div><button className="icon-button subtle" onClick={props.onRefresh}><RefreshCw size={18}/></button></div>
-        <div className="download-list">
-          {props.downloads.map((item) => <label className={`download-item ${props.selectedZip === item.path ? "selected" : ""}`} key={item.path}>
-            <input type="radio" name="zip" checked={props.selectedZip === item.path} onChange={() => props.setSelectedZip(item.path)}/>
-            <FileArchive size={24}/><span><strong>{item.name}</strong><small>{new Date(item.modified_at).toLocaleString("ja-JP")} · {formatBytes(item.size)}</small></span><ChevronRight size={18}/>
-          </label>)}
-          {!props.downloads.length && <EmptyState icon={<Download/>} title="ZIPがありません" text="Downloadsへ myao_app_patch のZIPを保存してください"/>}
-        </div>
-        <button className="button dark full" disabled={!props.selectedZip} onClick={props.onInspect}><ShieldCheck size={18}/>署名と内容を検証</button>
-      </article>
-      <article className="panel verification-panel">
-        <div className="panel-heading"><div><p className="step">STEP 2</p><h2>検証結果</h2></div>{props.summary && <span className="verified"><Check size={15}/>VERIFIED</span>}</div>
-        {props.summary ? <>
-          <div className="summary-strip"><div><span>Repositories</span><strong>{props.summary.repository_count}</strong></div><div><span>Patch sets</span><strong>{props.summary.package_count}</strong></div></div>
-          <div className="summary-repos">{props.summary.repositories.map((repo) => <div key={repo.repo_id}><PackageCheck size={18}/><span><strong>{repo.display_name}</strong><small>#{String(repo.first_sequence).padStart(6,"0")} → #{String(repo.last_sequence).padStart(6,"0")} · {formatBytes(repo.total_patch_size)}</small>{repo.mapping_error && <em>{repo.mapping_error}</em>}</span></div>)}</div>
-        </> : <EmptyState icon={<ShieldCheck/>} title="まだ検証されていません" text="左のZIPを選び、署名と内容を検証してください"/>}
-      </article>
-    </section>
-    <section className="action-panel">
-      <div><p className="step">STEP 3</p><h2>全アプリへ一括適用・コミット</h2><p>未コミット変更があれば事前に自動コミットし、パッチを適用して最新コミットまで完了させます（常にクリーン状態を維持）。</p></div>
-      <div className="button-row wrap"><button className="button ghost" onClick={props.onDiagnostics}><ShieldCheck size={17}/>会社環境診断</button><button className="button ghost" onClick={props.onCommit}><PackageCheck size={17}/>手動変更をすべてコミット</button><button className="button primary" disabled={!props.summary} onClick={props.onApply}><PackageCheck size={17}/>全アプリへ適用（即時コミット）</button></div>
-    </section>
-
-    <section className="company-repos-section">
-      <div className="section-heading">
-        <div>
-          <h2>会社側リポジトリ個別操作</h2>
-          <p>各リポジトリの未コミット・保留中パッチ状態を確認し、個別に適用やコミットを実行できます</p>
-        </div>
-        <div className="button-row">
-          <button className="button ghost" onClick={props.onSetAllRepoSequence} title="全アプリの適用開始番号を一括指定してstate.jsonを生成">
-            <Hash size={17} />全アプリの開始番号設定
-          </button>
-          <button className="button ghost" onClick={props.onRefreshRepos}>
-            <RefreshCw size={17} />状態更新
-          </button>
-        </div>
-      </div>
-      <div className="repo-grid">
-        {props.companyRepos.map((repo) => (
-          <article className="repo-card" key={repo.repo_id}>
-            <div className="repo-heading">
-              <div className={`repo-icon ${repo.kind}`}>
-                <GitBranch size={20} />
-              </div>
-              <div>
-                <h3>{repo.display_name}</h3>
-                <p>{repo.path}</p>
-              </div>
-              <div className="repo-header-actions">
-                <div className="repo-status-badge">
-                  {!repo.clean ? (
-                    <span className="badge warning">未コミット変更 ({repo.changes}件)</span>
-                  ) : (
-                    <span className="badge success">同期済み (#{String(repo.confirmed_sequence).padStart(6, "0")})</span>
-                  )}
-                </div>
-                <button
-                  className="icon-button delete-repo-btn"
-                  title="このリポジトリカードを削除"
-                  aria-label={`${repo.display_name} を削除`}
-                  onClick={() => props.onDeleteRepo(repo)}
-                >
-                  <Trash2 size={16} />
-                </button>
-              </div>
-            </div>
-            {repo.error ? (
-              <div className="inline-error">{repo.error}</div>
-            ) : (
-              <div>
-                <div className="repo-metrics">
-                  <div><span>ブランチ</span><code>{repo.branch || "-"}</code></div>
-                  <div><span>HEAD</span><code>{repo.head ? repo.head.slice(0, 7) : "-"}</code></div>
-                  <div><span>次回適用</span><code>#{String(repo.confirmed_sequence + 1).padStart(6, "0")}〜</code></div>
-                  <div><span>変更数</span><strong>{repo.changes}</strong></div>
-                </div>
-                <div className="button-row wrap" style={{ marginTop: "14px" }}>
-                  <button
-                    className="button ghost small"
-                    disabled={repo.clean}
-                    onClick={() => props.onCommitSingle(repo.repo_id)}
-                  >
-                    <Check size={14} />手動変更をコミット
-                  </button>
-                  <button
-                    className="button primary small"
-                    disabled={!props.selectedZip}
-                    onClick={() => props.onRetry(repo.repo_id)}
-                  >
-                    <PackageCheck size={14} />このアプリに適用
-                  </button>
-                  <button
-                    className="button ghost small"
-                    title="適用開始番号を指定してstate.jsonを生成"
-                    onClick={() => props.onSetSequence(repo.repo_id, repo.display_name, repo.confirmed_sequence)}
-                  >
-                    <Hash size={14} />開始番号設定
-                  </button>
-                  <button
-                    className="button ghost small"
-                    title="VS Codeで開く"
-                    onClick={() => props.onOpenVsCode(repo.path)}
-                  >
-                    <Code size={14} />VS Codeで開く
-                  </button>
-                </div>
-              </div>
-            )}
-          </article>
-        ))}
-        {!props.companyRepos.length && (
-          <EmptyState
-            icon={<HardDrive />}
-            title="会社側リポジトリが見つかりません"
-            text="設定メニューで「会社側アプリルート」または「会社側Obsidian設定」のパスを設定してください"
-          />
-        )}
-      </div>
-    </section>
-
-    {props.results.length > 0 && <section className="results"><h2>処理結果</h2>{props.results.map((item) => <div className={`result ${item.status}`} key={item.repo_id}><span className="result-icon">{item.status === "failed" ? <X/> : item.status === "unchanged" ? <CircleDot/> : <Check/>}</span><div><strong>{item.display_name}</strong><p>{item.message}</p></div>{item.status === "failed" && <button className="button ghost" onClick={() => props.onRetry(item.repo_id)}>このアプリだけ再実行</button>}</div>)}</section>}
-    {props.diagnostics && <section className="results"><h2>会社環境診断</h2>{props.diagnostics.checks.map((item: any) => <div className={`result ${item.status === "ok" ? "applied" : "failed"}`} key={item.name}><span className="result-icon">{item.status === "ok" ? <Check/> : <X/>}</span><div><strong>{item.name}</strong><p>{item.detail}</p></div></div>)}</section>}
-  </>;
-}
-
-function SettingsDrawer(props: { settings: Settings; setSettings: (value: Settings) => void; onSave: () => void; onClose: () => void }) {
-  const s = props.settings;
-  const patch = (value: Partial<Settings>) => props.setSettings({ ...s, ...value });
-  return <div className="drawer-layer"><button className="drawer-scrim" onClick={props.onClose} aria-label="閉じる"/><aside className="drawer">
-    <div className="drawer-header"><div><p className="eyebrow">LOCAL SETTINGS</p><h2><SettingsIcon size={21}/>設定</h2></div><button className="icon-button" onClick={props.onClose}><X/></button></div>
-    <div className="settings-body">
-      <fieldset><legend>動作モード</legend><div className="segmented"><button className={s.mode === "home" ? "active" : ""} onClick={() => patch({mode:"home"})}>自宅</button><button className={s.mode === "company" ? "active" : ""} onClick={() => patch({mode:"company"})}>会社</button></div></fieldset>
-      {s.mode === "home" ? <>
-        <Field label="アプリルート" value={s.apps_root} onChange={(apps_root) => patch({apps_root})}/>
-        <Field label="Obsidian設定リポジトリ" value={s.obsidian_repo} onChange={(obsidian_repo) => patch({obsidian_repo})}/>
-        <Field label="パッチ専用リポジトリ" value={s.patch_repo} onChange={(patch_repo) => patch({patch_repo})}/>
-        <Field label="GitHub トークン (Releases自動公開用)" type="password" placeholder={s.github_token_configured ? "設定済み（変更時のみ入力）" : "ghp_... (任意)"} value={s.github_token || ""} onChange={(github_token) => patch({github_token})}/>
-        <Field label="GitHub リポジトリ名 (owner/repo)" placeholder="未入力時はoriginから自動取得" value={s.github_repo || ""} onChange={(github_repo) => patch({github_repo})}/>
-      </> : <>
-        <Field label="会社側アプリルート" value={s.company_apps_root} onChange={(company_apps_root) => patch({company_apps_root})}/>
-        <Field label="会社側Obsidian設定" value={s.company_obsidian_repo} onChange={(company_obsidian_repo) => patch({company_obsidian_repo})}/>
-        <Field label="ZIP検索フォルダ" value={s.download_dir} onChange={(download_dir) => patch({download_dir})}/>
-        {s.company_excluded_repo_ids && s.company_excluded_repo_ids.length > 0 && (
-          <div className="field">
-            <span>除外中のリポジトリカード ({s.company_excluded_repo_ids.length}件)</span>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "6px" }}>
-              {s.company_excluded_repo_ids.map((id) => (
-                <span key={id} className="badge warning" style={{ display: "inline-flex", alignItems: "center", gap: "5px" }}>
-                  {id}
-                  <button
-                    type="button"
-                    style={{ border: 0, background: "transparent", cursor: "pointer", padding: "0 2px", color: "inherit", fontWeight: "bold" }}
-                    title="除外を解除してカードを再表示"
-                    onClick={() => {
-                      const next = s.company_excluded_repo_ids?.filter((x) => x !== id) || [];
-                      patch({ company_excluded_repo_ids: next });
-                    }}
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-            <button
-              type="button"
-              className="text-action-button"
-              style={{ marginTop: "6px" }}
-              onClick={() => patch({ company_excluded_repo_ids: [] })}
-            >
-              すべての除外を解除
-            </button>
-          </div>
-        )}
-      </>}
-      <Field label="パッチ検証パスワード" type="password" placeholder={s.password_configured ? "設定済み（変更時のみ入力）" : "自宅と会社で同じ値"} value={s.patch_password} onChange={(patch_password) => patch({patch_password})}/>
-      <div className="field-row">
-        <Field label="待受ホスト (127.0.0.1: ローカルのみ / 0.0.0.0: VPN・LAN許可)" value={s.listen_host} placeholder="127.0.0.1 または 0.0.0.0" onChange={(listen_host) => patch({listen_host})}/>
-        <Field label="ローカルポート" type="number" value={String(s.listen_port)} onChange={(value) => patch({listen_port:Number(value)})}/>
-      </div>
-      <Field label="分割サイズ (MiB)" type="number" value={String(s.chunk_size_mib)} onChange={(value) => patch({chunk_size_mib:Number(value)})}/>
-    </div>
-    <div className="drawer-footer"><button className="button primary full" onClick={props.onSave}><Save size={17}/>設定を保存</button></div>
-  </aside></div>;
-}
-
-function Field(props: { label: string; value: string; onChange: (value: string) => void; type?: string; placeholder?: string }) {
-  return <label className="field"><span>{props.label}</span><input type={props.type ?? "text"} value={props.value} placeholder={props.placeholder} onChange={(e) => props.onChange(e.target.value)}/></label>;
-}
-
-function EmptyState(props: { icon: React.ReactNode; title: string; text: string }) {
-  return <div className="empty-state"><span>{props.icon}</span><strong>{props.title}</strong><p>{props.text}</p></div>;
 }

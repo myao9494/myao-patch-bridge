@@ -9,6 +9,9 @@
  * - PackageSummary / DownloadPackage / OperationResult: パッチ送受信・適用関連型定義
  * - CompanyRepository / SequenceInitResult: 会社側リポジトリ個別状態および連番初期化型定義
  * - ResetResult: リポジトリパッチ履歴リセット結果型定義
+ * - PublishResult / PublishedPackage: パッチ公開結果型定義
+ * - CleanVerificationResult / VerifyAllSummary: 会社環境シミュレーション検証結果型定義
+ * - DiagnosticsResult: 環境診断結果型定義
  */
 
 export type Mode = "home" | "company";
@@ -59,7 +62,28 @@ export interface Settings {
   company_repo_paths: Record<string, string>;
   company_excluded_repo_ids?: string[];
   repositories: Record<string, Repository>;
+  /** 起動引数（--host / --allow-vpn / --port）を反映した実際の待受設定。表示専用で保存対象ではない */
+  effective_listen_host?: string;
+  effective_listen_port?: number;
 }
+
+/** 設定ドロワーから保存する項目。リポジトリ登録（repositories）は専用APIで管理するため含めない */
+export const EDITABLE_SETTING_KEYS = [
+  "mode",
+  "apps_root",
+  "obsidian_repo",
+  "patch_repo",
+  "company_apps_root",
+  "company_obsidian_repo",
+  "download_dir",
+  "patch_password",
+  "github_token",
+  "github_repo",
+  "listen_host",
+  "listen_port",
+  "chunk_size_mib",
+  "company_excluded_repo_ids",
+] as const satisfies readonly (keyof Settings)[];
 
 export interface DownloadPackage {
   path: string;
@@ -89,7 +113,7 @@ export interface OperationResult {
   display_name: string;
   status: "applied" | "failed" | "unchanged" | "committed";
   message: string;
-  pending_sequences?: number[];
+  confirmed_sequence?: number;
 }
 
 export interface CompanyRepository {
@@ -102,7 +126,6 @@ export interface CompanyRepository {
   head: string;
   branch: string;
   confirmed_sequence: number;
-  pending_sequences: number[];
   error?: string;
 }
 
@@ -121,13 +144,22 @@ export interface ResetResult {
   repository: Repository;
 }
 
+export interface PublishedPackage {
+  repo_id: string;
+  display_name: string;
+  sequence: number;
+  source_from_commit: string;
+  source_to_commit: string;
+}
+
 export interface PublishResult {
   published: boolean;
   message: string;
-  packages: any[];
+  packages: PublishedPackage[];
   bundle_path?: string;
   bundle_name?: string;
   bundle_size?: number;
+  bundle_error?: string;
   release_url?: string;
   download_url?: string;
   release_error?: string;
@@ -150,6 +182,9 @@ export interface VerifyAllSummary {
   results: Record<string, CleanVerificationResult>;
 }
 
-
-
-
+export interface DiagnosticsResult {
+  python: string;
+  platform: string;
+  passed: boolean;
+  checks: Array<{ name: string; status: "ok" | "failed"; detail: string }>;
+}

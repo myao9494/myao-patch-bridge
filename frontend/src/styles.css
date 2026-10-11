@@ -75,7 +75,8 @@ main { width: min(1420px, 90vw); margin: 0 auto; padding: 44px 0 90px; }
 .repo-heading > div:nth-child(2) { min-width:0; flex:1; }
 .repo-icon { width:42px; height:42px; display:grid; place-items:center; border-radius:3px; background:#dce9e4; color:var(--green); }
 .repo-icon.obsidian { background:#eadff4; color:#7649a4; }
-.switch input { display:none; }
+/* .repo-card input（display:block）より優先させ、トグル内のチェックボックス本体を隠す */
+.repo-card .switch input, .switch input { display:none; }
 .switch span { display:block; width:38px; height:22px; background:#c7c7c1; border-radius:20px; position:relative; }
 .switch span::after { content:""; position:absolute; width:16px; height:16px; background:white; border-radius:50%; left:3px; top:3px; transition:.2s; }
 .switch input:checked + span { background:var(--green); }
