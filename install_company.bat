@@ -1,10 +1,11 @@
 @echo off
 rem ==============================================================================
 rem Myao Patch Bridge Installer (install_company.bat)
-rem 仕様:
-rem 1. Python 3.10+ の存在を確認
-rem 2. .venv が作成できれば使用、できなければシステムの Python 環境に直接インストール
-rem 3. requirements.lock のパッケージを検証付きでインストール
+rem Keep this file ASCII-only: cmd.exe may misparse multi-byte text under the
+rem Japanese code page and skip or break the following lines.
+rem 1. Check that Python 3.10+ is available.
+rem 2. Use .venv when it can be created, otherwise install into the system python.
+rem 3. Install the packages pinned in requirements.lock with hash verification.
 rem ==============================================================================
 setlocal
 cd /d "%~dp0"

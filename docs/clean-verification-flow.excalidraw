@@ -139,13 +139,13 @@
       "roundness": null,
       "boundElements": [],
       "updated": 1,
-      "text": "会社環境シミュレーション検証\n1. git archive でクリーン環境構築\n2. .gitignore設定ファイル漏れ検査\n3. 差分パッチ模擬適用テスト",
+      "text": "会社環境シミュレーション検証\n1. Git追跡ファイル一覧を取得\n2. .gitignore設定ファイル漏れ検査\n3. 差分の公開可否チェック",
       "fontSize": 13,
       "fontFamily": 1,
       "textAlign": "center",
       "verticalAlign": "middle",
       "containerId": null,
-      "originalText": "会社環境シミュレーション検証\n1. git archive でクリーン環境構築\n2. .gitignore設定ファイル漏れ検査\n3. 差分パッチ模擬適用テスト"
+      "originalText": "会社環境シミュレーション検証\n1. Git追跡ファイル一覧を取得\n2. .gitignore設定ファイル漏れ検査\n3. 差分の公開可否チェック"
     },
     {
       "type": "arrow",

@@ -2,13 +2,15 @@
 
 インターネットへ接続できない会社環境へ、複数のGitリポジトリとObsidian設定の変更を安全に持ち込むためのPWAです。
 
-- 自宅モード: 登録した固定ブランチの差分を分割パッチ化し、専用GitHubリポジトリへpush
-- 会社モード: DownloadsのGitHub ZIPを直接検証し、独立したGit履歴へ機械的に適用
-- 会社側の変更は未コミットで保持し、次回パッチ前にユーザー操作で自動コミット
-- HMAC-SHA-256、分割SHA-256、ZIP検査、適用前バックアップ、アプリ単位の復元に対応
+- 自宅モード: 登録した固定ブランチの差分（変更ファイルの実体と削除一覧）を署名付きパッケージにし、専用GitHubリポジトリへpush
+- 会社モード: DownloadsのGitHub ZIPを直接検証し、独立したGit履歴を持つリポジトリへファイルを上書き配置して即時コミット
+- 会社側に未コミットの変更があれば、適用前に自動コミットして作業ツリーを常にクリーンに保つ
+- HMAC-SHA-256署名、SHA-256検証、ZIP検査、適用前バックアップ、アプリ単位の復元に対応
+- 公開前に「会社へ届かないファイル」を検知する会社環境シミュレーション検証
 
 ## ドキュメント
 
+- [仕様書（機能・API一覧）](docs/specification.md)
 - [全体設計](docs/architecture.md)
 - [自宅側の導入・運用](docs/home-operation.md)
 - [会社側の導入・運用](docs/company-operation.md)
@@ -35,3 +37,12 @@ uv run patch-bridge
 - パッチ専用リポジトリ: 通常の公開GitHubリポジトリ（Git LFS不要）
 
 会社側ではNode.js、Git clone、インターネット接続を必要としません。初回または更新時の `pip install` だけインターネットを使用します。
+
+## テスト
+
+```bash
+uv run pytest
+npm run lint --prefix frontend
+```
+
+詳細は [開発者向け情報](docs/development.md) を参照してください。

@@ -1,10 +1,11 @@
 @echo off
 rem ==============================================================================
 rem Myao Patch Bridge Launcher (start_patch_app.bat)
-rem 仕様:
-rem 1. .venv があれば優先使用、なければシステムの Python を使用
-rem 2. ポート 17345 の重複プロセスを停止してポートを解放
-rem 3. PYTHONPATH に src を設定して rep_patch を起動
+rem Keep this file ASCII-only: cmd.exe may misparse multi-byte text under the
+rem Japanese code page and skip or break the following lines.
+rem 1. Use .venv\Scripts\python.exe when it exists, otherwise the system python.
+rem 2. Stop any process already listening on port 17345.
+rem 3. Set PYTHONPATH to src and start rep_patch, passing all arguments through.
 rem ==============================================================================
 setlocal
 cd /d "%~dp0"

@@ -220,7 +220,7 @@
       "roundness": null,
       "boundElements": [],
       "updated": 1,
-      "text": "Uvicorn / FastAPI\n(0.0.0.0:17345)\n\nlocal_security ミドルウェア\nis_allowed_client_ip()\nによる接続元IP判定",
+      "text": "Uvicorn / FastAPI\n(0.0.0.0:17345)\n\nlocal_security ミドルウェア\n接続元IP判定\n＋Hostヘッダー検証",
       "fontSize": 14,
       "fontFamily": 1,
       "textAlign": "center",
