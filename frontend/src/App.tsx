@@ -61,6 +61,9 @@ interface BeforeInstallPromptEvent extends Event {
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 }
 
+/** 公開結果の通知へ列挙する注意の件数（多い場合は件数だけを示す） */
+const MAX_LISTED_WARNINGS = 5;
+
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
 }
@@ -298,7 +301,8 @@ export default function App() {
     if (value) {
       setVerificationResults((prev) => ({ ...prev, [repo.repo_id]: value }));
       if (value.valid) {
-        setNotice(`【${repo.display_name}】会社環境シミュレーション検証に合格しました（ファイル欠落なし）`);
+        const caution = value.warnings.length > 0 ? `\n注意が${value.warnings.length}件あります。カードの表示を確認してください` : "";
+        setNotice(`【${repo.display_name}】会社環境シミュレーション検証に合格しました（ファイル欠落なし）${caution}`);
       } else {
         setError(`【${repo.display_name}】ファイル欠落・検証エラーが検知されました: ${value.errors.join(" / ")}`);
       }
@@ -312,7 +316,8 @@ export default function App() {
     if (value) {
       setVerificationResults(value.results);
       if (value.all_valid) {
-        setNotice("すべてのリポジトリが会社側クリーン環境で正常に検証されました（設定ファイル欠落なし）");
+        const caution = value.total_warnings > 0 ? `\n注意が${value.total_warnings}件あります。各カードの表示を確認してください` : "";
+        setNotice(`すべてのリポジトリが会社側クリーン環境で正常に検証されました（設定ファイル欠落なし）${caution}`);
       } else {
         setError(`会社環境検証で ${value.total_errors} 件のエラーが検知されました。.gitignoreによる設定ファイル漏れ等を確認してください`);
       }
@@ -375,6 +380,13 @@ export default function App() {
       if (res.bundle_name && res.bundle_size) {
         const sizeKb = Math.round(res.bundle_size / 1024);
         msg += `\n今回分ZIP: ${res.bundle_name} (${sizeKb} KB)`;
+      }
+      const warnings = res.warnings ?? [];
+      if (warnings.length > 0) {
+        msg += `\n注意（${warnings.length}件）:\n` + warnings.slice(0, MAX_LISTED_WARNINGS).map((warning) => `・${warning}`).join("\n");
+        if (warnings.length > MAX_LISTED_WARNINGS) {
+          msg += `\nほか${warnings.length - MAX_LISTED_WARNINGS}件（各カードの「検証」で確認できます）`;
+        }
       }
       setNotice(msg);
       await loadRepositories();

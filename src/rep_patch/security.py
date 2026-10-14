@@ -178,13 +178,11 @@ def safe_repo_path(root: Path, relative: str) -> Path:
     safe = safe_relative_path(relative)
     root_resolved = root.resolve()
     target = root.joinpath(*safe.parts)
-    parent = target.parent
-    if parent.exists() and any(part.is_symlink() for part in [parent, *parent.parents] if part != root_resolved.parent):
-        # A stricter final containment check follows; this message makes symlink failures explicit.
-        resolved_parent = parent.resolve()
-        if root_resolved not in [resolved_parent, *resolved_parent.parents]:
-            raise PackageValidationError(f"リポジトリ外を指すシンボリックリンクです: {relative}")
+    # シンボリックリンクをすべてたどった先が、リポジトリの中に収まっていること
     resolved = target.resolve(strict=False)
-    if root_resolved not in [resolved, *resolved.parents]:
+    if not resolved.is_relative_to(root_resolved):
+        inside = [part for part in (target, *target.parents) if part.is_relative_to(root) and part != root]
+        if any(part.is_symlink() for part in inside):
+            raise PackageValidationError(f"リポジトリ外を指すシンボリックリンクです: {relative}")
         raise PackageValidationError(f"リポジトリ外のパスです: {relative}")
     return target

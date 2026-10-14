@@ -163,6 +163,8 @@ export interface PublishResult {
   release_url?: string;
   download_url?: string;
   release_error?: string;
+  /** 公開は成功したが利用者に知らせるべき点（会社側のファイルを上書きする同梱ファイルなど） */
+  warnings?: string[];
 }
 
 export interface CleanVerificationResult {

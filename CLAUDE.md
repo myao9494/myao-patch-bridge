@@ -47,14 +47,15 @@ npm run build    # frontend/dist を再生成
 | `api.py` | FastAPIアプリ。アクセス制御ミドルウェア、全エンドポイント、SPA配信。業務ロジックは持たず下の各モジュールへ委譲 |
 | `home.py` | 自宅モード: リポジトリ登録・検出・一覧、`publish`、パッチ履歴リセット |
 | `company.py` | 会社モード: ZIP検証、適用（バックアップ→配置→コミット→失敗時復元）、`state.json` |
-| `verifier.py` | 公開前の「会社環境シミュレーション検証」 |
+| `verifier.py` | 公開前の「会社環境シミュレーション検証」（自宅側リポジトリの内容を調べる） |
+| `rehearsal.py` | 公開前リハーサル。コミット済みの内容から「Download ZIP」と同じZIPを作り、会社側と同じ検証・適用を一時フォルダで実行する |
 | `packages.py` | パッケージ形式: インデックス、分割、`PatchArchive`（ZIPを展開せず検証）、今回分ZIP生成 |
 | `security.py` | HMAC署名、安全なパス解決、接続元IP・Hostヘッダーの判定 |
 | `git.py` | gitサブプロセスの唯一の入口（`run_git`）と状態・差分・blob取得 |
 | `config.py` | `Settings` / `RepositoryConfig` と `SettingsStore`（`data/settings.local.json`） |
 | `github.py` / `editors.py` / `diagnostics.py` / `fileio.py` | GitHub Releases、エディタ起動、環境診断、原子的書き込み |
 
-依存の向きは `api → home / company → verifier / packages → security / git / config`。`company.py` は `home.py` を読み込まない（会社側の起動にGitHub連携や公開処理を巻き込まない）。
+依存の向きは `api → home / company → verifier / packages → security / git / config`。これに加えて、公開前リハーサルのために `home → rehearsal → company` がある。`company.py` は `home.py` を読み込まない（会社側の起動にGitHub連携や公開処理を巻き込まない）。
 
 ### フロントエンド（`frontend/src/`）
 
@@ -66,8 +67,11 @@ npm run build    # frontend/dist を再生成
 
 - **設定の保存**: `SettingsStore.load()` は保存済みの値、`load_effective()` は起動引数（`--host` など）を重ねた値を返す。**保存するのは `load()` で得た値だけ**。`load_effective()` の結果を `save()` すると、一時的な `--allow-vpn` が設定ファイルへ恒久的に書き込まれる。
 - **排他**: 設定やリポジトリを書き換えるエンドポイントには `api.py` の `@exclusive` を付ける（読み込み→変更→保存の競合と、二重の公開・適用を防ぐ）。`PUT /api/settings` は `repositories` を無視する。リポジトリ登録は専用APIだけが変更する。
-- **パッチ専用リポジトリを汚さない**: `publish` は書き出し前に全リポジトリの設定を検証し、途中で失敗したら `_restore_patch_worktree` で直前のコミットへ戻す。未コミットの残骸があると次回の公開が「未コミットの変更があります」で止まる。
+- **パッチ専用リポジトリを汚さない**: `publish` は書き出し前に全リポジトリの設定を検証し、途中で失敗したら `_restore_patch_worktree` で公開前のコミットへ戻す。未コミットの残骸があると次回の公開が「未コミットの変更があります」で止まる。
+- **パッケージ内のファイルは `git add -f` でステージする**（`_stage_packages`）: `added_files/` には各アプリの `.gitignore` も入り、パッチ専用リポジトリの中で本物の除外設定として働く。通常の `git add` では対象ファイルがコミットから漏れ、会社側でZIP全体が「ZIP内のファイルがありません」で拒否される。
+- **pushの前に必ずリハーサルを通す**（`_rehearse`）: 会社へ届くのは作業ツリーではなくコミット済みの内容なので、確認は `git archive` で作ったZIPに対して行う。`skip_verification` でも省略しない。リハーサルは会社側の実コード（`apply_archive`）を呼ぶので、適用処理を変えたらリハーサルも同じ変更を受ける。
 - **会社側の適用はリポジトリ単位のトランザクション**: 失敗したら適用前のコミットとバックアップへ戻し、他のリポジトリは続行する。差分が無いパッチ（内容が既に一致）は失敗にせず、連番を進める。
+- **適用は「削除 → 配置」の順**: 会社PC（Windows）は大文字小文字を区別しない。`claude.md` → `CLAUDE.md` のような名前変更で配置の後に削除すると、書き込んだばかりの実体を消す。自宅側も、この形の旧パスを `deleted_files` に載せない（配置の後に削除する旧版の会社側アプリを守るため）。
 - **パスは必ず `safe_relative_path` / `safe_repo_path` を通す**: マニフェスト由来のパスでリポジトリ外や `.git` 配下へ書き込ませない。署名済みであっても信用しない。
 - **gitは `run_git` 経由で呼ぶ**: 端末の入力待ちで固まらない設定（`GIT_TERMINAL_PROMPT=0`、標準入力の切り離し）が入っている。pushなど通信を伴う呼び出しにはタイムアウトを付ける。
 - **`.bat` はASCIIのみ**: 日本語を含めると、会社PCのcmd.exe（日本語コードページ）が行を誤解釈することがある。

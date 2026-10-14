@@ -9,7 +9,8 @@
 - apply_archive: 各アプリへパッチを適用する
   1. 未コミット変更があれば `[myao-patch] アプリ名 update` として事前に自動コミット
   2. 連番の連続性を確認し、対象パスをバックアップ
-  3. 同梱ファイル実体を直接上書き配置し、削除対象ファイルを消去
+  3. 削除対象ファイルを消去（空になったフォルダも片付ける）してから、同梱ファイル実体を直接上書き配置
+     （削除が先なのは、大文字小文字だけの名前変更や、ファイルとフォルダの置き換えを正しく扱うため）
   4. `[myao-patch] アプリ名 patch-連番` として即時コミット
      （内容が既に一致していて差分が無い場合はコミットせず、適用済みとして連番だけ進める）
   5. 失敗時は適用前のコミットとバックアップから復元。リポジトリ単位で独立して処理する
@@ -21,6 +22,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -197,7 +199,9 @@ def _backup_paths(repo: Path, paths: list[str]) -> Path:
             source = safe_repo_path(repo, relative)
             if source.is_symlink():
                 raise RepPatchError(f"シンボリックリンクはパッチ対象にできません: {relative}")
-            exists = source.exists()
+            # フォルダだった場所がファイルへ置き換わる場合、フォルダ自体は退避しない
+            # （中の追跡ファイルは削除対象として個別に退避され、適用前のコミットからも復元できる）
+            exists = source.exists() and not source.is_dir()
             records.append({"path": relative, "existed": exists})
             if exists:
                 if not source.is_file():
@@ -212,19 +216,63 @@ def _backup_paths(repo: Path, paths: list[str]) -> Path:
     return target
 
 
+def _remove_file(path: Path) -> None:
+    """ファイルを消す。既に無い場合（途中のフォルダがファイルになっている場合を含む）は何もしない"""
+    try:
+        path.unlink()
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+
+
+def _remove_empty_parents(repo: Path, path: Path) -> None:
+    """ファイルを消して空になったフォルダを、リポジトリ直下まで順に片付ける（Gitは空フォルダを管理しない）"""
+    root = repo.resolve()
+    parent = path.parent
+    while parent.resolve() != root:
+        try:
+            parent.rmdir()
+        except OSError:
+            return
+        parent = parent.parent
+
+
+def _match_name_case(target: Path) -> None:
+    """
+    同じフォルダに大文字小文字だけが違う名前の項目があれば、これから書き込む名前へ改名する。
+
+    WindowsやmacOSでは claude.md と CLAUDE.md は同じファイルを指すので、そのまま書き込むと
+    古い名前のまま内容だけが変わる。
+    """
+    try:
+        names = os.listdir(target.parent)
+    except OSError:
+        return
+    if target.name in names:
+        return
+    folded = target.name.casefold()
+    for name in names:
+        if name.casefold() == folded:
+            (target.parent / name).rename(target)
+            return
+
+
 def _restore_backup(repo: Path, backup: Path, pre_apply_head: str) -> None:
     """適用前のコミットへ戻し、Git管理外のファイルも含めて対象パスを適用前の内容へ復元する"""
     run_git(repo, ["reset", "--hard", pre_apply_head])
     metadata = read_json(backup / "backup.json")
+    # 適用前に無かったものを先に消してから、退避した内容を戻す
     for record in metadata["paths"]:
-        relative = record["path"]
-        destination = safe_repo_path(repo, relative)
+        if not record["existed"]:
+            destination = safe_repo_path(repo, record["path"])
+            if not destination.is_dir():
+                _remove_file(destination)
+    for record in metadata["paths"]:
         if record["existed"]:
+            relative = record["path"]
+            destination = safe_repo_path(repo, relative)
             source = (backup / "files").joinpath(*safe_relative_path(relative).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
-        else:
-            destination.unlink(missing_ok=True)
 
 
 def _remove_backup(value: str) -> None:
@@ -300,14 +348,20 @@ def _apply_packages(
     backup = _backup_paths(repo, _affected_paths(packages))
     try:
         for package in packages:
+            # 削除を先に行う。大文字小文字だけが違う名前への変更（Readme.md → README.md）が
+            # 削除と追加の両方に載っている場合、WindowsやmacOSでは同じファイルを指すため、
+            # 後から消すと書き込んだばかりの実体を失う。
+            # ファイルがフォルダへ（またはその逆へ）置き換わる場合も、先に場所を空ける必要がある。
+            for relative in package.manifest.get("deleted_files", []):
+                target_file = safe_repo_path(repo, relative)
+                _remove_file(target_file)
+                _remove_empty_parents(repo, target_file)
             # 変更・新規追加ファイルの実体を直接上書き配置
             for record in package.manifest.get("added_files") or []:
                 target_file = safe_repo_path(repo, record["path"])
                 target_file.parent.mkdir(parents=True, exist_ok=True)
+                _match_name_case(target_file)
                 target_file.write_bytes(archive.read_added_file(package, record["path"]))
-            # 削除対象ファイルを消去
-            for relative in package.manifest.get("deleted_files", []):
-                safe_repo_path(repo, relative).unlink(missing_ok=True)
 
         run_git(repo, ["add", "-A"])
         committed = _commit_staged(repo, message)

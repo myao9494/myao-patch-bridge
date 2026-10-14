@@ -12,6 +12,8 @@ Gitコマンド実行およびリポジトリ状態解析を行うユーティ�
 - tracked_files / changed_paths: 追跡対象ファイル一覧およびコミット間差分ファイル取得
 - diff_file_status: コミット間の追加・変更・削除ファイル一覧の分類取得
 - read_blobs: 複数のblob実体を1回のgit実行でまとめて取得
+- ignored_paths: 指定パスのうち、.gitignore 等の除外ルールに当てはまるもの（追跡中のファイルも判定する）
+- paths_with_attribute: 指定パスのうち、.gitattributes で属性が特定の値になっているもの
 """
 from __future__ import annotations
 
@@ -251,3 +253,46 @@ def read_blobs(path: Path, object_ids: Iterable[str]) -> dict[str, bytes]:
     if missing:
         raise RepPatchError(f"Gitオブジェクトが見つかりません: {missing[0]}")
     return result
+
+
+def _nul_separated(paths: Iterable[str]) -> bytes:
+    return b"".join(path.encode("utf-8", errors="surrogateescape") + b"\0" for path in paths)
+
+
+def ignored_paths(path: Path, candidates: Iterable[str]) -> list[str]:
+    """
+    candidates のうち、現在の除外ルール（.gitignore、info/exclude、グローバル設定）に当てはまるパスを返す。
+
+    追跡中のファイルも判定する（--no-index）。「追跡されているのに除外対象でもある」ファイルの検出に使う。
+    判定できなかった場合は空の一覧を返す。
+    """
+    wanted = sorted(set(candidates))
+    if not wanted:
+        return []
+    result = run_git(
+        path, ["check-ignore", "--no-index", "-z", "--stdin"], check=False, input_bytes=_nul_separated(wanted)
+    )
+    if result.returncode != 0:
+        return []
+    return sorted(
+        item.decode("utf-8", errors="surrogateescape") for item in result.stdout.split(b"\0") if item
+    )
+
+
+def paths_with_attribute(path: Path, candidates: Iterable[str], attribute: str, value: str) -> list[str]:
+    """candidates のうち、.gitattributes で attribute が value に設定されているパスを返す"""
+    wanted = sorted(set(candidates))
+    if not wanted:
+        return []
+    result = run_git(
+        path, ["check-attr", "-z", "--stdin", attribute], check=False, input_bytes=_nul_separated(wanted)
+    )
+    if result.returncode != 0:
+        return []
+    fields = result.stdout.split(b"\0")
+    matched = [
+        fields[index].decode("utf-8", errors="surrogateescape")
+        for index in range(0, len(fields) - 2, 3)
+        if fields[index + 2].decode("utf-8", errors="replace") == value
+    ]
+    return sorted(matched)

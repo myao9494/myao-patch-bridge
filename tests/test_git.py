@@ -7,6 +7,8 @@ Gitユーティリティ（rep_patch/git.py）のテスト
 - diff_file_status: 追加・変更・削除・リネームを分類する（リネームは旧パス削除＋新パス追加）
 - read_blobs: 複数のファイル実体（空・バイナリ・日本語パスを含む）を1回の実行で取得する
 - run_git: gitが認証情報を端末へ問い合わせて待ち続けない／タイムアウトを失敗として返す
+- ignored_paths: 追跡中かどうかに関係なく、除外ルールに当てはまるパスを返す
+- paths_with_attribute: .gitattributes で属性が指定の値になっているパスを返す
 """
 from __future__ import annotations
 
@@ -19,7 +21,9 @@ from rep_patch.errors import GitCommandError, RepPatchError
 from rep_patch.git import (
     diff_file_status,
     ensure_repository,
+    ignored_paths,
     is_repository,
+    paths_with_attribute,
     read_blobs,
     repository_status,
     run_git,
@@ -125,3 +129,28 @@ def test_run_git_timeout_is_reported_as_failure(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     with pytest.raises(GitCommandError, match="中断しました"):
         run_git(repo, ["-c", "alias.wait=!sleep 2", "wait"], timeout=0.2)
+
+
+def test_ignored_paths_reports_tracked_files_matching_ignore_rules(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text("*.local.json\nbuild/\n", encoding="utf-8")
+    (repo / "settings.local.json").write_text("{}", encoding="utf-8")
+    (repo / "build").mkdir()
+    (repo / "build" / "日本語 [1].js").write_text("x", encoding="utf-8")
+    git(repo, "add", "-f", ".gitignore", "settings.local.json", "build")
+    git(repo, "commit", "-m", "track ignored files")
+
+    candidates = ["a.txt", "settings.local.json", "build/日本語 [1].js", "missing.txt"]
+    assert ignored_paths(repo, candidates) == ["build/日本語 [1].js", "settings.local.json"]
+    assert ignored_paths(repo, ["a.txt", "b.txt"]) == []
+    assert ignored_paths(repo, []) == []
+
+
+def test_paths_with_attribute_reports_matching_paths(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / ".gitattributes").write_text("*.exe filter=lfs diff=lfs -text\n*.txt text\n", encoding="utf-8")
+
+    candidates = ["a.txt", "tools/launcher.exe", "tools/readme.md"]
+    assert paths_with_attribute(repo, candidates, "filter", "lfs") == ["tools/launcher.exe"]
+    assert paths_with_attribute(repo, ["a.txt"], "filter", "lfs") == []
+    assert paths_with_attribute(repo, [], "filter", "lfs") == []

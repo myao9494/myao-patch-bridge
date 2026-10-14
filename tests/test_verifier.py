@@ -10,6 +10,10 @@
   5. ignore_patterns（除外パターン）に一致するファイルは検証から除外
   6. 直前コミットからの差分が公開・適用できる形（祖先関係、サブモジュールなし）であることを検証
   7. キャッシュ・ログ・ロックファイルなどのノイズは欠落として扱わない
+  8. 会社PC（Windows）で作れない名前（予約名、使えない文字、大文字小文字だけが違う同名ファイル）を
+     差分に含む場合はエラーにする。以前から存在していて今回変更の無いファイルは対象にしない
+  9. 追跡されているのに .gitignore の対象でもあるファイル、Git LFS のファイルが差分にある場合は、
+     エラーにせず warnings で知らせる
 """
 from __future__ import annotations
 
@@ -293,3 +297,134 @@ def test_verify_all_repositories_reports_broken_repository(tmp_path: Path) -> No
     assert summary["all_valid"] is False
     assert summary["total_errors"] == 1
     assert summary["results"]["gone"]["repo_id"] == "gone"
+
+
+def _git(repo: Path, *args: str, stdin: bytes | None = None) -> str:
+    completed = subprocess.run(["git", *args], cwd=repo, input=stdin, check=True, capture_output=True)
+    return completed.stdout.decode().strip()
+
+
+def _baseline(repo: Path) -> str:
+    (repo / "main.py").write_text("print('ok')", encoding="utf-8")
+    _commit(repo, "init")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def test_verify_rejects_names_that_windows_cannot_create(tmp_path: Path) -> None:
+    repo = tmp_path / "app_repo"
+    _init_git_repo(repo)
+    baseline = _baseline(repo)
+    for name in ("aux.txt", "docs/what?.md", "notes/trailing.", "ok/fine name.txt"):
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text("x", encoding="utf-8")
+    _commit(repo, "add names")
+
+    result = verify_clean_repository(repo, branch="main", baseline_commit=baseline)
+
+    assert result["valid"] is False
+    assert len(result["errors"]) == 3
+    assert any("Windowsの予約名" in error and "'aux.txt'" in error for error in result["errors"])
+    assert any("使えない文字" in error and "'docs/what?.md'" in error for error in result["errors"])
+    assert any("末尾が空白またはピリオド" in error and "'notes/trailing.'" in error for error in result["errors"])
+
+    # 既に届いているファイルは、今回の差分に無ければ対象にしない
+    head = _git(repo, "rev-parse", "HEAD")
+    (repo / "main.py").write_text("print('v2')", encoding="utf-8")
+    _commit(repo, "unrelated change")
+    assert verify_clean_repository(repo, branch="main", baseline_commit=head)["valid"] is True
+
+
+def test_verify_rejects_files_that_differ_only_by_case(tmp_path: Path) -> None:
+    repo = tmp_path / "app_repo"
+    _init_git_repo(repo)
+    (repo / "Guide.md").write_text("upper", encoding="utf-8")
+    baseline = _baseline(repo)
+    # 大文字小文字を区別しないファイルシステム上でも作れるよう、インデックスへ直接登録する
+    blob = _git(repo, "hash-object", "-w", "--stdin", stdin=b"lower")
+    _git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},guide.md")
+    _git(repo, "commit", "-m", "add case twin")
+
+    result = verify_clean_repository(repo, branch="main", baseline_commit=baseline)
+
+    assert result["valid"] is False
+    assert any("大文字小文字だけが違う" in error and "'guide.md' と 'Guide.md'" in error for error in result["errors"])
+
+
+def test_verify_warns_about_ignored_but_tracked_and_lfs_files(tmp_path: Path) -> None:
+    repo = tmp_path / "app_repo"
+    _init_git_repo(repo)
+    baseline = _baseline(repo)
+    (repo / ".gitignore").write_text("local/\n", encoding="utf-8")
+    (repo / ".gitattributes").write_text("*.exe filter=lfs -text\n", encoding="utf-8")
+    (repo / "local").mkdir()
+    (repo / "local" / "state.bin").write_bytes(b"\x00state")
+    (repo / "tool.exe").write_text("version https://git-lfs.github.com/spec/v1\n", encoding="utf-8")
+    _git(repo, "add", "-f", ".")
+    _git(repo, "commit", "-m", "add ignored and lfs files")
+
+    result = verify_clean_repository(repo, branch="main", baseline_commit=baseline)
+
+    assert result["valid"] is True and result["errors"] == []
+    assert len(result["warnings"]) == 2
+    assert any(".gitignore の対象" in warning and "'local/state.bin'" in warning for warning in result["warnings"])
+    assert any("Git LFS" in warning and "'tool.exe'" in warning for warning in result["warnings"])
+
+    # 差分に含まれなくなれば、警告も出ない
+    head = _git(repo, "rev-parse", "HEAD")
+    (repo / "main.py").write_text("print('v2')", encoding="utf-8")
+    _commit(repo, "unrelated change")
+    assert verify_clean_repository(repo, branch="main", baseline_commit=head)["warnings"] == []
+
+
+def _long_relative_path(length: int) -> str:
+    """指定した長さのリポジトリ内パス（フォルダ数段 + ファイル名）を作る"""
+    prefix = "d" * 40 + "/" + "e" * 40 + "/"
+    return prefix + "f" * (length - len(prefix) - 3) + ".py"
+
+
+def test_verify_rejects_paths_too_long_for_windows(tmp_path: Path) -> None:
+    from rep_patch.verifier import BACKUP_PREFIX, COMPANY_ROOT_LENGTH, WINDOWS_MAX_PATH
+
+    # 会社側のルート(50) + 区切り(1) + 退避先 + 相対パスが259文字までなら通る
+    limit = WINDOWS_MAX_PATH - 1 - COMPANY_ROOT_LENGTH - 1 - len(BACKUP_PREFIX)
+    repo = tmp_path / "app_repo"
+    _init_git_repo(repo)
+    baseline = _baseline(repo)
+    ok_path, too_long = _long_relative_path(limit), _long_relative_path(limit + 1)
+    assert len(ok_path) == limit and len(too_long) == limit + 1
+    for name in (ok_path, too_long):
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text("x", encoding="utf-8")
+    _commit(repo, "add long paths")
+
+    result = verify_clean_repository(repo, branch="main", baseline_commit=baseline)
+
+    assert result["valid"] is False
+    assert len(result["errors"]) == 1
+    assert "パスが長すぎて" in result["errors"][0] and f"'{too_long}'" in result["errors"][0]
+
+    # 削除するファイルも、適用前に退避するので対象になる
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "rm", "-q", too_long)
+    _commit(repo, "remove long path")
+    deleted = verify_clean_repository(repo, branch="main", baseline_commit=head)
+    assert deleted["valid"] is False and f"'{too_long}'" in deleted["errors"][0]
+    _git(repo, "reset", "-q", "--hard", head)
+    _git(repo, "rm", "-q", ok_path)
+    _commit(repo, "remove ok path")
+    assert verify_clean_repository(repo, branch="main", baseline_commit=head)["valid"] is True
+
+
+def test_backup_prefix_matches_the_real_backup_location(tmp_path: Path) -> None:
+    from rep_patch.company import _backup_paths
+    from rep_patch.verifier import BACKUP_PREFIX
+
+    repo = tmp_path / "app_repo"
+    _init_git_repo(repo)
+    _baseline(repo)
+
+    backup = _backup_paths(repo, ["main.py"])
+
+    actual = (backup / "files" / "main.py").relative_to(repo).as_posix()
+    assert len(actual) == len(BACKUP_PREFIX + "main.py")
+    assert actual.startswith(".git/rep-patch/backups/") and actual.endswith("/files/main.py")

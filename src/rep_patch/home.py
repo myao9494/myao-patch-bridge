@@ -12,8 +12,11 @@
   2. 全リポジトリの差分範囲を確定（設定不備は何も書き出す前に検出）し、事前クリーン検証を実行
   3. 差分パッチの分割、変更・新規ファイル実体の同梱、削除記録、マニフェスト署名
   4. .gitattributesのバイナリ保護、過去パッチの削除（リポジトリ軽量化）、今回分だけのインデックス署名、コミット
-     （ここまでに失敗した場合は作りかけを破棄し、直前のコミットの状態へ戻す）
-  5. push成功後に公開済みコミットと連番を保存し、今回分軽量ZIPの生成とGitHub Releases自動公開を行う
+     （パッケージ内のファイルは、同梱した .gitignore の対象であっても強制的にコミットへ含める）
+  5. 公開前リハーサル: コミットした内容から「Download ZIP」と同じZIPを作り、会社側と同じ検証・適用を
+     一時フォルダで実行して、結果が公開先コミットと一致することを確認する（rehearsal.py）
+     （ここまでに失敗した場合は作りかけとコミットを破棄し、公開前のコミットの状態へ戻す。pushはしない）
+  6. push成功後に公開済みコミットと連番を保存し、今回分軽量ZIPの生成・検証とGitHub Releases自動公開を行う
 - reset_repository_patches: 指定リポジトリのパッチ専用リポジトリ内パッケージ削除・インデックス再署名・pushおよび公開済みコミット・連番の初期化
 """
 from __future__ import annotations
@@ -53,6 +56,7 @@ from .git import (
 from .packages import (
     INDEX_NAME,
     SCHEMA_VERSION,
+    PatchArchive,
     build_index,
     create_release_bundle,
     load_index,
@@ -60,8 +64,9 @@ from .packages import (
     split_patch,
     write_json,
 )
+from .rehearsal import rehearse_commit
 from .security import sha256_bytes, sign_document
-from .verifier import unsupported_diff_entries, verify_clean_repository
+from .verifier import diff_warnings, unsupported_diff_entries, verify_clean_repository
 
 # パッチ専用リポジトリの .gitattributes に必ず含めるバイナリ保護ルール
 PATCH_REPO_BINARY_RULES = ("*.patch.part-* binary", "packages/** binary")
@@ -259,15 +264,54 @@ def _ensure_patch_repo_clean(patch_root: Path) -> None:
         raise RepPatchError("パッチ専用リポジトリに未コミットの変更があります")
 
 
-def _restore_patch_worktree(patch_root: Path) -> None:
+def _head_commit(patch_root: Path) -> str:
+    """現在のコミットID。まだコミットが無ければ空文字列"""
+    result = run_git(patch_root, ["rev-parse", "--verify", "--quiet", "HEAD"], check=False)
+    return result.text if result.returncode == 0 else ""
+
+
+def _restore_patch_worktree(patch_root: Path, commit: str | None = None) -> None:
     """
-    作りかけのパッケージを破棄し、パッチ専用リポジトリを直前のコミットの状態へ戻す。
+    作りかけのパッケージを破棄し、パッチ専用リポジトリを commit（省略時は現在のコミット）の状態へ戻す。
+    commit が空文字列（処理前にコミットが1つも無かった）の場合は、コミットの無い状態へ戻す。
 
     呼び出し前に作業ツリーがクリーンであることを確認済みなので、消えるのは今回の公開処理が
-    書き出したファイルだけである。これを怠ると次回の公開が「未コミットの変更があります」で止まる。
+    書き出したファイルと作ったコミットだけである。これを怠ると次回の公開が
+    「未コミットの変更があります」で止まる。
     """
-    run_git(patch_root, ["reset", "--hard", "HEAD"], check=False)
+    if commit == "":
+        run_git(patch_root, ["update-ref", "-d", "HEAD"], check=False)
+        run_git(patch_root, ["read-tree", "--empty"], check=False)
+    else:
+        run_git(patch_root, ["reset", "--hard", commit or "HEAD"], check=False)
     run_git(patch_root, ["clean", "-fd"], check=False)
+    # 同梱した .gitignore の対象になったファイルは「無視されたファイル」として残るので、それも消す
+    run_git(patch_root, ["clean", "-fdx", "--", "packages"], check=False)
+
+
+def _stage_packages(patch_root: Path, created: list[dict[str, Any]]) -> None:
+    """
+    今回の公開内容をステージする。
+
+    パッケージには各アプリの .gitignore も同梱されるため、通常の `git add` では、その対象になる
+    同梱ファイル（追跡されているのに除外対象でもあるファイル）がコミットから漏れ、会社側で
+    「ZIP内のファイルがありません」になる。パッケージのフォルダは除外ルールを無視して追加する。
+    """
+    run_git(patch_root, ["add", "-A"])
+    package_dirs = [str(package_dir(str(m["repo_id"]), int(m["sequence"]))) for m in created]
+    run_git(patch_root, ["--literal-pathspecs", "add", "-f", "--", *package_dirs])
+
+
+def _rehearse(patch_root: Path, settings: Settings) -> None:
+    """コミットした内容を会社側と同じ手順で検証・適用してみる。問題があれば公開を中止させる"""
+    sources = {repo_id: Path(config.path) for repo_id, config in settings.repositories.items()}
+    try:
+        rehearse_commit(patch_root, "HEAD", settings.patch_password, sources)
+    except RepPatchError as exc:
+        raise RepPatchError(
+            "公開前リハーサル（会社側と同じ検証・適用を自宅で実行）で問題が見つかったため、"
+            f"公開を中止しました。GitHubへは送信していません: {exc}"
+        ) from exc
 
 
 def _ensure_gitattributes(patch_root: Path) -> None:
@@ -374,6 +418,9 @@ def _build_package(
 
     relative_dir = package_dir(config.repo_id, sequence)
     target_dir = patch_root.joinpath(*relative_dir.parts)
+    if target_dir.exists():
+        # 以前の失敗で残った実体があると、マニフェストに無いファイルが紛れ込む
+        shutil.rmtree(target_dir)
     chunks = split_patch(patch, target_dir, settings.chunk_size_mib * 1024 * 1024)
 
     # 新規追加・変更されたファイルの実体を同梱する（会社側はこれを直接上書き配置する）
@@ -396,6 +443,14 @@ def _build_package(
             }
         )
 
+    # 大文字小文字だけを変えた名前変更（claude.md → CLAUDE.md）では、古い名前を削除一覧に載せない。
+    # 会社PC（Windows）では新旧の名前が同じファイルを指すので、削除を後から実行する版の会社側アプリが
+    # 書き込んだばかりの実体を消してしまう。載せなければ、どの版でも内容は正しく届く。
+    delivered_folded = {rel_path.casefold() for rel_path in bundle_paths}
+    deleted_files = [
+        rel_path for rel_path in diff_status["deleted"] if rel_path.casefold() not in delivered_folded
+    ]
+
     manifest = sign_document(
         {
             "schema_version": SCHEMA_VERSION,
@@ -412,7 +467,7 @@ def _build_package(
             "chunks": chunks,
             "changed_paths": changed_paths(repo, source, target),
             "added_files": added_records,
-            "deleted_files": diff_status["deleted"],
+            "deleted_files": deleted_files,
             "target_files": target_entries,
         },
         settings.patch_password,
@@ -502,6 +557,11 @@ def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool
     plans = _plan_publish(settings)
     if not skip_verification:
         _verify_plans(plans)
+    warnings = [
+        f"[{plan.config.display_name}] {warning}"
+        for plan in plans
+        for warning in diff_warnings(plan.repo, plan.source, plan.target)
+    ]
     nothing_to_publish = {"published": False, "message": "公開する変更はありません", "packages": []}
     if not plans:
         return nothing_to_publish
@@ -515,6 +575,7 @@ def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool
     created: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc)
     label = now.strftime("%Y-%m-%d")
+    head_before = _head_commit(patch_root)
     try:
         _ensure_gitattributes(patch_root)
         for plan in plans:
@@ -523,15 +584,17 @@ def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool
             if manifest:
                 created.append(manifest)
         if not created:
-            _restore_patch_worktree(patch_root)
+            _restore_patch_worktree(patch_root, head_before)
             return nothing_to_publish
         _prune_old_packages(patch_root, created)
         # package-index.json を今回作成されたパッチのみで再構築
         write_json(index_path, build_index(created, settings.patch_password))
-        run_git(patch_root, ["add", "-A"])
+        _stage_packages(patch_root, created)
         run_git(patch_root, ["commit", "-m", f"Publish patch package {label}"])
+        # 会社へ届く内容で、会社側と同じ検証・適用を先に実行する。失敗したらコミットごと取り消す
+        _rehearse(patch_root, settings)
     except BaseException:
-        _restore_patch_worktree(patch_root)
+        _restore_patch_worktree(patch_root, head_before)
         raise
     # ここで失敗してもコミットは残り、次回の公開時に先頭でpushを再試行する
     _push(patch_root)
@@ -555,6 +618,7 @@ def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool
         "release_url": "",
         "download_url": "",
         "release_error": "",
+        "warnings": warnings,
     }
 
     # 配布用軽量ZIPの生成（今回作成されたパッチのみ同梱）。パッチ自体は公開済みなので失敗しても中断しない
@@ -566,6 +630,13 @@ def publish(settings: Settings, store: SettingsStore, *, skip_verification: bool
             output_dir=_bundle_output_dir(settings, patch_root),
             bundle_name=f"myao_app_patch_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}.zip",
         )
+        try:
+            # 手渡し用のZIPも、会社側と同じ検証を通ることを確かめてから渡す
+            with PatchArchive(bundle_path, settings.patch_password):
+                pass
+        except Exception:
+            bundle_path.unlink(missing_ok=True)
+            raise
     except Exception as exc:  # noqa: BLE001
         result["bundle_error"] = str(exc)
         return result

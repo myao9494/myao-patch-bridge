@@ -8,6 +8,7 @@ src/rep_patch/
   home.py         自宅モード: リポジトリ検出・登録・一覧、パッチ生成・公開、履歴リセット
   company.py      会社モード: ZIP検証、バックアップ、適用、コミット、state.json
   verifier.py     公開前の会社環境シミュレーション検証
+  rehearsal.py    公開前リハーサル（会社へ届くZIPを作り、会社側と同じ検証・適用を一時フォルダで実行）
   packages.py     パッケージ形式、分割、ZIP読取（PatchArchive）、今回分ZIP生成
   security.py     HMAC署名、パス検証、接続元IP・Hostヘッダー判定
   git.py          shellを使わないGitコマンドラッパー（gitの呼び出しは必ずここを通す）
@@ -29,7 +30,7 @@ tests/                  Git統合テスト、API、セキュリティ
 docs/                   仕様書・設計・運用手順
 ```
 
-依存の向きは `api → home / company → verifier / packages → security / git / config` です。`company.py` は `home.py` を読み込みません。
+依存の向きは `api → home / company → verifier / packages → security / git / config` です。これに加えて、公開前リハーサルのために `home → rehearsal → company` があります。`company.py` は `home.py` を読み込みません。
 
 ## 開発環境
 
@@ -73,6 +74,7 @@ npm run lint --prefix frontend                  # フロントエンドの型チ
 | ファイル | 対象 |
 | :--- | :--- |
 | `test_home_flow.py` | 公開、履歴リセット、公開失敗時の後始末、自宅→会社の通し |
+| `test_rehearsal.py` | 公開前リハーサル（`.gitignore` 対象ファイルの同梱、失敗時の公開中止、大文字小文字だけの名前変更、ファイルとフォルダの置き換え） |
 | `test_company_flow.py` | 適用、事前コミット、内容一致パッチ、失敗時復元、連番、旧形式の状態 |
 | `test_packages.py` | ZIPの改ざん・欠落・安全でないパスの拒否、改行コード復元 |
 | `test_release_bundle.py` | 今回分ZIPの生成 |

@@ -237,6 +237,18 @@ function RepositoryCard(props: {
               )}
             </div>
           )}
+          {verification && verification.warnings.length > 0 && (
+            <div style={{ marginTop: "6px", padding: "8px 12px", borderRadius: "6px", fontSize: "0.85rem", backgroundColor: "#fef7e0", color: "#8a5a00" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: "bold" }}>
+                <AlertTriangle size={16} />注意（公開はできます）
+              </div>
+              <ul style={{ margin: "6px 0 0 16px", padding: 0, fontSize: "0.8rem" }}>
+                {verification.warnings.map((warning, i) => (
+                  <li key={i}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="button-row" style={{ marginTop: "12px", justifyContent: "space-between", alignItems: "center" }}>
             <button className="text-button" onClick={() => props.onSaveRepo(repo)}>
               <Save size={15} />この設定を保存
