@@ -66,7 +66,7 @@ Patch Appはパッチ専用リポジトリの `.gitattributes` に `packages/** 
 | `patch_sha256` | 分割前パッチのSHA-256 |
 | `chunks` | 分割名、サイズ、SHA-256、順序 |
 | `changed_paths` | 差分に含まれるパス（バックアップ対象） |
-| `added_files` | 新規追加・変更されたファイルの一覧（相対パス、サイズ、SHA-256）。実体は `added_files/` 配下 |
+| `added_files` | 新規追加・変更されたファイルの一覧（相対パス、サイズ、SHA-256）。実体は `added_files/` 配下。大きなファイルは `parts`（順序どおりのサイズとSHA-256）を持ち、実体は `added_parts/` 配下のパーツに分割される |
 | `deleted_files` | 削除されたファイルの一覧（リネームの旧パスを含む。ただし `added_files` のいずれかと大文字小文字だけが違うパスは含めない） |
 | `target_files` | 公開時点の全追跡ファイル（path / blob / mode / type） |
 | `signature` | マニフェストのHMAC-SHA-256 |
@@ -97,7 +97,10 @@ Patch Appはパッチ専用リポジトリの `.gitattributes` に `packages/** 
 
 ## 分割
 
-分割の対象は差分パッチ本体（`changes.patch.part-*`）で、既定は20 MiBです。パッチの生バイト列を順番どおりに切り分けます。同梱ファイル実体（`added_files/`）は分割しません。Git LFSは使用しません。
+分割の対象は差分パッチ本体（`changes.patch.part-*`）で、既定は20 MiBです。パッチの生バイト列を順番どおりに切り分けます。
+同梱ファイル実体は、チャンクサイズ（既定20 MiB）を超えるものだけを同じ大きさで分割し、`added_parts/<パス>.part-NNNNNN` に書き出します。マニフェストの `added_files[].parts` に順序、サイズ、SHA-256を記録し、会社側はパーツを1つずつ照合してから結合し、全体のサイズとSHA-256も照合して配置します。GitHubの1ファイル100 MB上限を超える実行ファイルなどを運ぶための仕組みです。
+
+Git LFSで管理されているファイルは、自宅側で実体を取り出して同梱します（会社PCはLFSサーバーへ接続できません）。実体は、自宅側リポジトリのLFSキャッシュ、無ければ `git lfs smudge` で取得し、ポインタ記載のサイズとSHA-256と照合します。取得できないときは公開を中止します。パッチ専用リポジトリでは、各アプリの `.gitattributes`（`filter=lfs`）が実体をポインタへ戻さないよう、gitのLFSフィルターを無効にして扱います。
 
 ## 不変性
 

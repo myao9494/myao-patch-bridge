@@ -5,6 +5,7 @@
 - SCHEMA_VERSION: パッケージ仕様バージョン
 - package_dir / index_entry / build_index: パッケージの配置パスと署名付きインデックスの組み立て
 - split_patch: 指定サイズごとのバイナリパッチ分割処理
+- split_added_file / added_part_name: 大きな同梱ファイル実体のパーツ分割（会社側で結合して照合する）
 - resolve_added_file_content: 改行コード変換（CRLF↔LF）差異を透過的に検知・元バイト列復元するファイル検証処理
 - PatchArchive: パッチZIPを一括展開せずに検証し、同梱ファイル実体を読み出す
 - create_release_bundle: 今回公開されたパッチのみを含む配布用軽量ZIPアーカイブの生成
@@ -115,6 +116,30 @@ def split_patch(data: bytes, target_dir: Path, chunk_size: int) -> list[dict[str
         (target_dir / name).write_bytes(value)
         chunks.append({"name": name, "size": len(value), "sha256": sha256_bytes(value)})
     return chunks
+
+
+def added_part_name(safe_path: str, index: int) -> str:
+    """分割された同梱ファイル実体のパーツ名（パッケージ内の added_parts/ からの相対パス）"""
+    return f"{safe_path}.part-{index:06d}"
+
+
+def split_added_file(
+    data: bytes, safe_path: str, target_dir: Path, chunk_size: int
+) -> list[dict[str, Any]]:
+    """
+    同梱ファイル実体を chunk_size ごとに分割して target_dir/added_parts/ へ書き出す。
+
+    GitHubは1ファイル100MBまでしか受け付けないため、大きな実体は分割して運び、会社側で結合する。
+    返り値はマニフェストの added_files[].parts に記録する（順序、サイズ、SHA-256）。
+    """
+    parts: list[dict[str, Any]] = []
+    for index, offset in enumerate(range(0, len(data), chunk_size), start=1):
+        value = data[offset : offset + chunk_size]
+        part_path = target_dir / "added_parts" / added_part_name(safe_path, index)
+        part_path.parent.mkdir(parents=True, exist_ok=True)
+        part_path.write_bytes(value)
+        parts.append({"size": len(value), "sha256": sha256_bytes(value)})
+    return parts
 
 
 def resolve_added_file_content(
@@ -299,15 +324,35 @@ class PatchArchive:
         """同梱ファイル実体を読み、マニフェスト記載のサイズ・SHA-256と一致するバイト列を返す"""
         safe_path = str(safe_relative_path(str(record.get("path", ""))))
         base = PurePosixPath(manifest_path).parent
-        archive_name = self.root_prefix + str(base / "added_files" / safe_path)
-        content = self._read_limited(archive_name, MAX_ADDED_FILE_BYTES)
         size = record.get("size")
-        resolved = resolve_added_file_content(
-            content, size if isinstance(size, int) else -1, str(record.get("sha256", ""))
-        )
-        if resolved is None:
-            raise PackageValidationError(f"追加ファイルが破損しています: {safe_path}")
-        return resolved
+        expected_size = size if isinstance(size, int) else -1
+        parts = record.get("parts")
+        if parts is None:
+            archive_name = self.root_prefix + str(base / "added_files" / safe_path)
+            content = self._read_limited(archive_name, MAX_ADDED_FILE_BYTES)
+            resolved = resolve_added_file_content(content, expected_size, str(record.get("sha256", "")))
+            if resolved is None:
+                raise PackageValidationError(f"追加ファイルが破損しています: {safe_path}")
+            return resolved
+
+        # 分割されたファイル: パーツごとに照合してから結合し、全体のサイズとSHA-256も照合する
+        if not isinstance(parts, list) or not parts or expected_size < 0 or expected_size > MAX_ADDED_FILE_BYTES:
+            raise PackageValidationError(f"追加ファイルの分割情報が不正です: {safe_path}")
+        buffer = bytearray()
+        for index, part in enumerate(parts, start=1):
+            if not isinstance(part, dict):
+                raise PackageValidationError(f"追加ファイルの分割情報が不正です: {safe_path}")
+            archive_name = self.root_prefix + str(base / "added_parts" / added_part_name(safe_path, index))
+            value = self._read_limited(archive_name, MAX_CHUNK_BYTES)
+            if len(value) != part.get("size") or sha256_bytes(value) != part.get("sha256"):
+                raise PackageValidationError(f"追加ファイルの分割パーツが破損しています: {safe_path} ({index}/{len(parts)})")
+            buffer.extend(value)
+            if len(buffer) > expected_size:
+                break
+        content = bytes(buffer)
+        if len(content) != expected_size or sha256_bytes(content) != record.get("sha256"):
+            raise PackageValidationError(f"追加ファイルの結合結果が一致しません: {safe_path}")
+        return content
 
     def read_added_file(self, package: ArchivePackage, relative_path: str) -> bytes:
         safe_path = str(safe_relative_path(relative_path))

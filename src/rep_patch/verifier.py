@@ -18,7 +18,7 @@
        Windowsのパス長の上限（MAX_PATH）に収まること
   6. 公開は止めないが利用者に知らせるべき点を warnings として報告（diff_warnings）
      - 追跡されているのに .gitignore の対象でもあるファイル（会社側の同名ファイルを上書きする）
-     - Git LFS で管理されているファイル（実体ではなくポインタが届く）
+     - Git LFS で管理されているファイル（公開時に実体を取り出して同梱する）
   7. 検証結果（valid, repo_id, branch, target_commit, errors, warnings, checked_files）を返却
 - verify_repository_config: リポジトリ設定（RepositoryConfig）から検証条件を組み立てて検証
 - verify_all_repositories: 有効な全リポジトリを一括検証して集計
@@ -201,7 +201,7 @@ def diff_warnings(repo: Path, base: str, target: str) -> list[str]:
         for rel_path in ignored_paths(repo, delivered)
     ]
     warnings.extend(
-        f"Git LFS で管理されているため、実体ではなくポインタファイルが会社へ届きます: '{rel_path}'"
+        f"Git LFS で管理されています。公開時に実体を取り出して同梱します（git-lfs の導入と `git lfs pull` が必要です）: '{rel_path}'"
         for rel_path in paths_with_attribute(repo, delivered, "filter", "lfs")
     )
     return warnings

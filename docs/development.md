@@ -12,6 +12,7 @@ src/rep_patch/
   packages.py     パッケージ形式、分割、ZIP読取（PatchArchive）、今回分ZIP生成
   security.py     HMAC署名、パス検証、接続元IP・Hostヘッダー判定
   git.py          shellを使わないGitコマンドラッパー（gitの呼び出しは必ずここを通す）
+  lfs.py          Git LFSポインタの判定と実体の取り出し（会社へ運ぶ前に実体へ置き換える）
   config.py       設定の定義と永続化（Git対象外の data/settings.local.json）
   github.py       GitHub Releases API
   editors.py      VS Code / Antigravity の起動

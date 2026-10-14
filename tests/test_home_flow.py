@@ -17,7 +17,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -665,3 +667,81 @@ def test_reset_requires_clean_patch_repo(tmp_path: Path) -> None:
     assert (patch_repo / "stray.txt").exists()
     assert (patch_repo / "packages" / "sample-app" / "000001").exists()
     assert store.load().repositories["sample-app"].last_sequence == 1
+
+
+def _lfs_pointer(content: bytes) -> bytes:
+    digest = hashlib.sha256(content).hexdigest()
+    return f"version https://git-lfs.github.com/spec/v1\noid sha256:{digest}\nsize {len(content)}\n".encode("ascii")
+
+
+def _cache_lfs_object(repo: Path, content: bytes) -> None:
+    digest = hashlib.sha256(content).hexdigest()
+    target = repo / ".git" / "lfs" / "objects" / digest[:2] / digest[2:4] / digest
+    target.parent.mkdir(parents=True)
+    target.write_bytes(content)
+
+
+def test_publish_ships_lfs_object_split_into_parts_and_company_joins_it(tmp_path: Path) -> None:
+    """LFS管理の大きなファイルは、ポインタではなく実体を分割して運び、会社側で結合して配置する"""
+    store, patch_repo, sources = _home_setup(tmp_path)
+    source = sources["sample-app"]
+    (source / "base.txt").write_text("base\n", encoding="utf-8")
+    baseline = commit_all(source, "baseline")
+    settings = store.load()
+    settings.repositories["sample-app"].baseline_commit = baseline
+    settings.chunk_size_mib = 1
+    store.save(settings)
+    company = init_repo(tmp_path / "company-apps" / "sample-app")
+    shutil.copy(source / "app.txt", company / "app.txt")
+    commit_all(company, "company baseline")
+
+    real_exe = os.urandom(2_500_000)
+    (source / ".gitattributes").write_text("*.exe filter=lfs diff=lfs merge=lfs -text\n", encoding="utf-8")
+    (source / "launcher.exe").write_bytes(_lfs_pointer(real_exe))
+    commit_all(source, "add lfs launcher")
+    _cache_lfs_object(source, real_exe)
+    # 実運用では git-lfs の設定が入っている。パッチ専用リポジトリへ入れる際にポインタへ戻されないこと
+    (Path.home() / ".gitconfig").write_text(
+        '[filter "lfs"]\n\tclean = false\n\tprocess = /nonexistent/git-lfs filter-process\n\trequired = true\n',
+        encoding="utf-8",
+    )
+
+    result = publish(store.load(), store)
+    assert result["published"] is True
+    record = next(r for r in result["packages"][0]["added_files"] if r["path"] == "launcher.exe")
+    assert record["size"] == len(real_exe)
+    assert len(record["parts"]) == 3
+    package_root = patch_repo / "packages" / "sample-app" / "000001"
+    assert not (package_root / "added_files" / "launcher.exe").exists()
+    assert all(
+        len((package_root / "added_parts" / f"launcher.exe.part-{i:06d}").read_bytes()) <= 1024 * 1024
+        for i in (1, 2, 3)
+    )
+
+    company_settings = Settings(
+        mode="company",
+        company_apps_root=str(tmp_path / "company-apps"),
+        patch_password="test-password",
+        download_dir=str(tmp_path / "bundles"),
+    )
+    applied = apply_archive(company_settings, result["bundle_path"])
+    assert applied["failed"] == 0, applied["results"]
+    assert (company / "launcher.exe").read_bytes() == real_exe
+
+
+def test_publish_refuses_when_lfs_object_is_unavailable(tmp_path: Path) -> None:
+    """LFSの実体を取り出せないときは、ポインタを黙って運ばず公開を止める"""
+    store, patch_repo, sources = _home_setup(tmp_path)
+    source = sources["sample-app"]
+    (source / "base.txt").write_text("base\n", encoding="utf-8")
+    baseline = commit_all(source, "baseline")
+    settings = store.load()
+    settings.repositories["sample-app"].baseline_commit = baseline
+    store.save(settings)
+    (source / ".gitattributes").write_text("*.exe filter=lfs -text\n", encoding="utf-8")
+    (source / "launcher.exe").write_bytes(_lfs_pointer(b"not available locally"))
+    commit_all(source, "add lfs launcher")
+
+    with pytest.raises(RepPatchError, match="Git LFS"):
+        publish(store.load(), store)
+    assert _status(patch_repo) == ""

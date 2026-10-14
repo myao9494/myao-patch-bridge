@@ -61,9 +61,11 @@ from .packages import (
     create_release_bundle,
     load_index,
     package_dir,
+    split_added_file,
     split_patch,
     write_json,
 )
+from .lfs import parse_lfs_pointer, resolve_lfs_pointer
 from .rehearsal import rehearse_commit
 from .security import sha256_bytes, sign_document
 from .verifier import diff_warnings, unsupported_diff_entries, verify_clean_repository
@@ -430,18 +432,25 @@ def _build_package(
     blobs = read_blobs(repo, [blob_ids[rel_path] for rel_path in bundle_paths])
     added_records: list[dict[str, Any]] = []
     added_files_dir = target_dir / "added_files"
+    chunk_bytes = settings.chunk_size_mib * 1024 * 1024
     for rel_path in bundle_paths:
         file_bytes = blobs[blob_ids[rel_path]]
-        file_target = added_files_dir / rel_path
-        file_target.parent.mkdir(parents=True, exist_ok=True)
-        file_target.write_bytes(file_bytes)
-        added_records.append(
-            {
-                "path": rel_path,
-                "size": len(file_bytes),
-                "sha256": sha256_bytes(file_bytes),
-            }
-        )
+        if parse_lfs_pointer(file_bytes) is not None:
+            # 会社PCはオフラインでLFSの実体を取得できない。自宅側で実体を取り出して運ぶ
+            file_bytes = resolve_lfs_pointer(repo, file_bytes, rel_path)
+        record: dict[str, Any] = {
+            "path": rel_path,
+            "size": len(file_bytes),
+            "sha256": sha256_bytes(file_bytes),
+        }
+        if len(file_bytes) > chunk_bytes:
+            # GitHubの1ファイル上限（100MB）を超えないよう分割して運ぶ。会社側で結合・照合する
+            record["parts"] = split_added_file(file_bytes, rel_path, target_dir, chunk_bytes)
+        else:
+            file_target = added_files_dir / rel_path
+            file_target.parent.mkdir(parents=True, exist_ok=True)
+            file_target.write_bytes(file_bytes)
+        added_records.append(record)
 
     # 大文字小文字だけを変えた名前変更（claude.md → CLAUDE.md）では、古い名前を削除一覧に載せない。
     # 会社PC（Windows）では新旧の名前が同じファイルを指すので、削除を後から実行する版の会社側アプリが

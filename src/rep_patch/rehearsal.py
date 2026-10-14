@@ -31,6 +31,7 @@ from .company import GIT_USER_FALLBACK, apply_archive, init_repository_sequence
 from .config import Settings
 from .errors import RepPatchError
 from .git import read_blobs, run_git, tracked_files
+from .lfs import parse_lfs_pointer, resolve_lfs_pointer
 from .packages import ArchivePackage, PatchArchive
 from .security import safe_repo_path
 
@@ -141,7 +142,11 @@ class _SimulatedRepository:
         for path in self.paths:
             actual = self.root.joinpath(*PurePosixPath(path).parts)
             if path in expected:
-                if not actual.is_file() or actual.read_bytes() != blobs[expected[path]]:
+                content = blobs[expected[path]]
+                if parse_lfs_pointer(content) is not None:
+                    # LFS管理のファイルは、ポインタではなく実体が届いているはず
+                    content = resolve_lfs_pointer(self.source_repo, content, path)
+                if not actual.is_file() or actual.read_bytes() != content:
                     wrong.append(path)
             elif _file_remains(actual):
                 wrong.append(path)

@@ -30,6 +30,14 @@ from .errors import GitCommandError, RepPatchError
 NETWORK_TIMEOUT_SECONDS = 30 * 60
 
 
+_LFS_FILTER_OVERRIDES = (
+    ("filter.lfs.process", ""),
+    ("filter.lfs.clean", "cat"),
+    ("filter.lfs.smudge", "cat"),
+    ("filter.lfs.required", "false"),
+)
+
+
 @dataclass
 class GitResult:
     stdout: bytes
@@ -55,6 +63,18 @@ def _git_environment() -> dict[str, str]:
     environment["GIT_TERMINAL_PROMPT"] = "0"
     # 状態取得のたびにインデックスを書き換えず、エディタ等が実行するgitとロックを奪い合わない
     environment["GIT_OPTIONAL_LOCKS"] = "0"
+    # Git LFSのフィルターを無効にする。同梱された各アプリの .gitattributes（filter=lfs）が
+    # パッチ専用リポジトリの中でも働くと、ステージ時に実体がポインタへ置き換わってしまう。
+    # このアプリは実体を自分で取り出して扱う（lfs.py）ので、gitには常に素のバイト列として扱わせる。
+    try:
+        count = int(environment.get("GIT_CONFIG_COUNT", "0"))
+    except ValueError:
+        count = 0
+    for key, value in _LFS_FILTER_OVERRIDES:
+        environment[f"GIT_CONFIG_KEY_{count}"] = key
+        environment[f"GIT_CONFIG_VALUE_{count}"] = value
+        count += 1
+    environment["GIT_CONFIG_COUNT"] = str(count)
     return environment
 
 

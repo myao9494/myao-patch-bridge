@@ -51,7 +51,8 @@ npm run build    # frontend/dist を再生成
 | `rehearsal.py` | 公開前リハーサル。コミット済みの内容から「Download ZIP」と同じZIPを作り、会社側と同じ検証・適用を一時フォルダで実行する |
 | `packages.py` | パッケージ形式: インデックス、分割、`PatchArchive`（ZIPを展開せず検証）、今回分ZIP生成 |
 | `security.py` | HMAC署名、安全なパス解決、接続元IP・Hostヘッダーの判定 |
-| `git.py` | gitサブプロセスの唯一の入口（`run_git`）と状態・差分・blob取得 |
+| `git.py` | gitサブプロセスの唯一の入口（`run_git`）と状態・差分・blob取得。LFSフィルターは常に無効（実体の扱いは `lfs.py`） |
+| `lfs.py` | Git LFSポインタの判定と実体の取り出し。公開時とリハーサルで使う |
 | `config.py` | `Settings` / `RepositoryConfig` と `SettingsStore`（`data/settings.local.json`） |
 | `github.py` / `editors.py` / `diagnostics.py` / `fileio.py` | GitHub Releases、エディタ起動、環境診断、原子的書き込み |
 
@@ -70,6 +71,7 @@ npm run build    # frontend/dist を再生成
 - **パッチ専用リポジトリを汚さない**: `publish` は書き出し前に全リポジトリの設定を検証し、途中で失敗したら `_restore_patch_worktree` で公開前のコミットへ戻す。未コミットの残骸があると次回の公開が「未コミットの変更があります」で止まる。
 - **パッケージ内のファイルは `git add -f` でステージする**（`_stage_packages`）: `added_files/` には各アプリの `.gitignore` も入り、パッチ専用リポジトリの中で本物の除外設定として働く。通常の `git add` では対象ファイルがコミットから漏れ、会社側でZIP全体が「ZIP内のファイルがありません」で拒否される。
 - **pushの前に必ずリハーサルを通す**（`_rehearse`）: 会社へ届くのは作業ツリーではなくコミット済みの内容なので、確認は `git archive` で作ったZIPに対して行う。`skip_verification` でも省略しない。リハーサルは会社側の実コード（`apply_archive`）を呼ぶので、適用処理を変えたらリハーサルも同じ変更を受ける。
+- **LFSのポインタを会社へ運ばない**: `added_files` にはLFSの実体を入れる（`lfs.resolve_lfs_pointer`）。実体を取れなければ公開を中止する。チャンクサイズを超える実体は `added_parts/` へ分割し、会社側が結合・照合する。`run_git` がLFSフィルターを無効にするのは、同梱された `.gitattributes` がパッチ専用リポジトリ内で実体をポインタへ戻すため。
 - **会社側の適用はリポジトリ単位のトランザクション**: 失敗したら適用前のコミットとバックアップへ戻し、他のリポジトリは続行する。差分が無いパッチ（内容が既に一致）は失敗にせず、連番を進める。
 - **適用は「削除 → 配置」の順**: 会社PC（Windows）は大文字小文字を区別しない。`claude.md` → `CLAUDE.md` のような名前変更で配置の後に削除すると、書き込んだばかりの実体を消す。自宅側も、この形の旧パスを `deleted_files` に載せない（配置の後に削除する旧版の会社側アプリを守るため）。
 - **パスは必ず `safe_relative_path` / `safe_repo_path` を通す**: マニフェスト由来のパスでリポジトリ外や `.git` 配下へ書き込ませない。署名済みであっても信用しない。
